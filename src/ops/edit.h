@@ -1,5 +1,5 @@
 #pragma once
-// Changing code in the store (Unison-style: the store is the source of truth).
+// Changing code in the store (the store is the source of truth).
 //
 // Edits work on an in-memory Namespace; commit_edits() saves it as the working
 // namespace and fills in the review warnings (size, missing tests).

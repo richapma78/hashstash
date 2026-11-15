@@ -2,7 +2,7 @@
 
 **hashstash is a version control system for AI/SI agentic coding.** It versions code
 at the level of functions, methods, classes and structs instead of files, keeps that
-code in a content-addressed database (the approach the Unison language pioneered),
+code in a content-addressed database,
 and speaks a git-like vocabulary: `commit`, `push`, `pull`, `branch`, `merge`.
 Normal source files are *generated* from the database whenever they're needed: to
 build, to run, or to push to GitHub.
@@ -23,7 +23,7 @@ This file is the technical design.
 Both are thin shells over one C++ library, `libhashstash`, so the CLI, the local MCP
 server and the hub all run the same code.
 
-## 2. Unison-style working model
+## 2. Working model: the store is the source
 
 Code lives in the database. There is no checked-out working tree of source files.
 
@@ -57,7 +57,7 @@ characters).
 | **Fragment** | A piece of a large definition stored on its own, placed back into its parent at a crumb. |
 | **Crumbtrail** | The ordered placement list for a file (or for a container's body): a sequence of Def, Glue and Fragment references. |
 | **Namespace** | The tree of a project: qualified names to Def hashes, file paths to crumbtrails, plus each definition's lineage ID. |
-| **Commit** | A namespace hash, parent commit hashes, author, time and message (Unison's "causal"). |
+| **Commit** | A namespace hash, parent commit hashes, author, time and message. |
 
 ### Two hashes per definition
 
@@ -221,14 +221,14 @@ so they follow renames, roll back with history and sync with pushes.
 
 ## 8. Sync
 
-Like git and Unison, sync is a hash exchange. The client and hub compare commit
+Like git, sync is a hash exchange. The client and hub compare commit
 hashes, work out which objects the other side lacks, and transfer only those. A push
 is a compare-and-swap of the branch head: it succeeds only if the hub's head is still
 the one the client started from (a fast-forward), otherwise the client must pull and
 merge first.
 
-Received objects are staged until all their dependencies have arrived, as Unison's
-`temp_entity` tables do.
+Received objects are staged until all their dependencies have arrived, so a
+half-finished transfer never leaves a broken object in the store.
 
 ### Protocol
 
