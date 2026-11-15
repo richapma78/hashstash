@@ -148,6 +148,24 @@ Commit load_commit(const Store& s, const Hash& h) {
   return c;
 }
 
+std::vector<Hash> object_refs(const Object& o) {
+  std::vector<Hash> out;
+  if (o.kind == "blob" || o.kind == "frag" || o.kind == "attach") return out;
+  json j = json::parse(o.body);
+  if (o.kind == "commit") {
+    out.push_back(j.at("ns"));
+    for (auto& p : j.at("parents")) out.push_back(p);
+  } else if (o.kind == "namespace") {
+    for (auto& [path, e] : j.at("files").items()) out.push_back(e.at(1));
+    if (j.contains("attach"))
+      for (auto& [id, h] : j["attach"].items()) out.push_back(h);
+  } else if (o.kind == "file" || o.kind == "def") {
+    for (auto& p : j.at("parts"))
+      if (p.at(0) != "t") out.push_back(p.at(1));
+  }
+  return out;
+}
+
 std::string render_parts(const Store& s, const std::vector<Part>& parts) {
   std::string out;
   for (auto& p : parts) {

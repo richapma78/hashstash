@@ -13,6 +13,12 @@
 #include "ops/build.h"
 #include "ops/context.h"
 #include "ops/edit.h"
+#include "hub/backend.h"
+#include "hub/service.h"
+#include "ops/history.h"
+#include "ops/locks.h"
+#include "ops/publish.h"
+#include "ops/sync.h"
 #include "ops/query.h"
 #include "ops/tests.h"
 #include "ops/import_render.h"
@@ -107,6 +113,36 @@ TEST(python_analyze) {
   CHECK(a2.norm != c.norm);
 }
 
+TEST(cpp_split) {
+  const Language* cpp = language_by_name("cpp");
+  std::string src = read_file(fs::path(HS_FIXTURES) / "cpp" / "sample.hpp");
+  auto chunks = cpp->split(src);
+  std::vector<std::string> names;
+  for (auto& c : chunks) names.push_back(c.kind + " " + c.name);
+  if (std::getenv("HS_DEBUG")) {
+    std::function<void(const std::vector<Chunk>&, int)> dump = [&](const std::vector<Chunk>& v, int d) {
+      for (auto& c : v) {
+        std::cerr << std::string(d * 2, ' ') << c.kind << " " << c.name << "\n";
+        dump(c.children, d + 1);
+      }
+    };
+    dump(chunks, 0);
+  }
+  CHECK((names == std::vector<std::string>{"namespace demo", "struct Anonymous", "struct Named"}));
+  std::vector<std::string> kids;
+  for (auto& c : chunks[0].children) kids.push_back(c.kind + " " + c.name);
+  CHECK((kids == std::vector<std::string>{"struct Point", "class Shape", "enum Color", "function twice",
+                                          "function add", "function add", "method Shape::normalize"}));
+  // Comment above Point is attached; class members split out.
+  CHECK(starts_with(src.substr(chunks[0].children[0].begin), "// A point in 2D."));
+  std::vector<std::string> members;
+  for (auto& c : chunks[0].children[1].children) members.push_back(c.name);
+  CHECK((members == std::vector<std::string>{"~Shape", "scale"}));
+  auto a = cpp->analyze(src.substr(chunks[0].children[6].begin, chunks[0].children[6].end - chunks[0].children[6].begin));
+  CHECK(a.signature == "void Shape::normalize()");
+  CHECK(a.calls.size() == 1 && a.calls[0].name == "helper::clamp");
+}
+
 static bool roundtrip_file(Store& s, const std::string& path, const std::string& bytes) {
   FileEntry e = store_file(s, path, bytes);
   return render_entry(s, e) == bytes;
@@ -195,6 +231,120 @@ TEST(edit_keeps_identity) {
     CHECK(text.find("    def peek(self):\n        return self.memory\n") != std::string::npos);
   }
   fs::remove_all(dir);
+}
+
+// Calls the hub service directly, as the HTTP server would.
+struct InProcessHub : HubTransport {
+  HubService& svc;
+  std::string project;
+  InProcessHub(HubService& s, std::string p) : svc(s), project(std::move(p)) {}
+  nlohmann::json call(const std::string& op, const nlohmann::json& req) override { return svc.handle(project, op, req); }
+};
+
+TEST(hub_sync) {
+  fs::path dir = temp_dir("hub");
+  {
+    auto backend = make_sqlite_backend(to_generic(dir / "hub"));
+    HubService svc(*backend);
+    svc.handle("demo", "create", {});
+    InProcessHub hub(svc, "demo");
+    set_lock_transport_override(&hub);
+
+    // Agent A imports, commits, and must verify before pushing.
+    auto a = Repo::init(dir / "a", "demo");
+    a->set_agent("agent-a");
+    set_remote(*a, "origin", "http://unused/demo");
+    import_path(*a, fs::path(HS_FIXTURES) / "sample_project");
+    autolink_tests(*a);
+    commit(*a, "import");
+    bool refused = false;
+    try {
+      push(*a, hub);
+    } catch (std::exception&) {
+      refused = true;
+    }
+    CHECK(refused);  // not verified
+    a->store().exec("INSERT INTO verification(ns, status, time, agent, report) "
+                    "SELECT value, 'passed', 0, 'test', '{}' FROM ref WHERE name = 'work/main'");
+    auto pr = push(*a, hub);
+    CHECK(pr["uploaded"].get<int>() > 10);
+
+    // Agent B clones it.
+    auto b = Repo::init(dir / "b", "demo");
+    b->set_agent("agent-b");
+    set_remote(*b, "origin", "http://unused/demo");
+    auto pl = pull(*b, hub);
+    CHECK(b->work_ns_hash() == a->work_ns_hash());
+    CHECK(render_def(b->store(), resolve_name(*b, "mul").hash) == render_def(a->store(), resolve_name(*a, "mul").hash));
+
+    // A locks mul: the lock goes to the hub, and B can't take it.
+    IndexRow mul = resolve_name(*a, "mul");
+    acquire_lock(*a, mul.lineage, mul.qname);
+    bool blocked = false;
+    try {
+      acquire_lock(*b, mul.lineage, mul.qname);
+    } catch (std::exception&) {
+      blocked = true;
+    }
+    CHECK(blocked);
+    // After a pull, B's local edits respect the hub lock too.
+    pull(*b, hub);
+    Namespace nsb = b->work_ns();
+    auto eb = replace_def(*b, nsb, mul.qname, "def mul(a, b):\n    return a * b\n", "");
+    CHECK(!eb.ok);
+
+    // A edits, commits, verifies, pushes; B fast-forwards.
+    Namespace nsa = a->work_ns();
+    auto ea = replace_def(*a, nsa, mul.qname, "def mul(a, b):\n    return a * b\n", "", "simpler");
+    CHECK(ea.ok);
+    commit_edits(*a, nsa, {&ea});
+    commit(*a, "simpler mul");
+    a->store().exec("INSERT OR IGNORE INTO verification(ns, status, time, agent, report) "
+                    "SELECT value, 'passed', 0, 'test', '{}' FROM ref WHERE name = 'work/main'");
+    std::cerr << "push2\n";
+    push(*a, hub);
+    auto pl2 = pull(*b, hub);
+    CHECK(starts_with(pl2["result"].get<std::string>(), "fast-forward"));
+    CHECK(render_def(b->store(), resolve_name(*b, "mul").hash) == "def mul(a, b):\n    return a * b\n");
+    // Commit released A's lock locally; the next push synced that to the hub.
+    CHECK(svc.handle("demo", "locks", {})["locks"].empty());
+
+    // A stale push (B behind) is refused rather than overwriting.
+    Namespace nsb2 = b->work_ns();
+    auto eb2 = add_def(*b, nsb2, "calc/ops.py", "", "", "def neg(a):\n    return -a\n");
+    commit_edits(*b, nsb2, {&eb2});
+    commit(*b, "neg");
+    Namespace nsa2 = a->work_ns();
+    auto ea2 = add_def(*a, nsa2, "calc/ops.py", "", "", "def sq(a):\n    return a * a\n");
+    commit_edits(*a, nsa2, {&ea2});
+    commit(*a, "sq");
+    for (auto* r : {a.get(), b.get()})
+      r->store().exec("INSERT OR IGNORE INTO verification(ns, status, time, agent, report) "
+                      "SELECT value, 'passed', 0, 'test', '{}' FROM ref WHERE name = 'work/main'");
+    std::cerr << "push3\n";
+    push(*a, hub);
+    bool stale = false;
+    try {
+      push(*b, hub);
+    } catch (std::exception&) {
+      stale = true;
+    }
+    CHECK(stale);
+
+    // Hub publishes the branch to a git working copy.
+    Repo* hub_repo = dynamic_cast<LocalRepoAccess*>(backend->project("demo", false).get())->local_repo();
+    write_file(hub_repo->hs_dir() / "config.toml",
+               read_file(hub_repo->hs_dir() / "config.toml") + "\n[publish]\ngit_dir = \"git-out\"\n");
+    auto hub_repo2 = Repo::open(hub_repo->root());
+    auto pub = publish(*hub_repo2);
+    CHECK(pub["changed"].get<bool>());
+    CHECK(read_file(hub_repo->root() / "git-out" / "calc" / "ops.py").find("def sq(a):") != std::string::npos);
+    auto pub2 = publish(*hub_repo2);
+    CHECK(!pub2["changed"].get<bool>());
+    set_lock_transport_override(nullptr);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
 }
 
 TEST(roundtrip_corpus) {

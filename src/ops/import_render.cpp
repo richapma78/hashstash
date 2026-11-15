@@ -50,7 +50,7 @@ std::vector<SizeWarning> size_warnings(const Repo& repo, const std::vector<FlatD
   int limit = repo.config().warn_lines;
   if (limit <= 0) return out;
   for (auto& d : defs)
-    if (d.def.lines > limit)
+    if (d.def.lines > limit && d.def.kind != "namespace")
       out.push_back({d.qname, d.def.lines, limit,
                      d.def.kind == "class"
                          ? "move code out of the class body into methods or helpers"

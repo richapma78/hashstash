@@ -9,6 +9,8 @@
 #include "ops/history.h"
 #include "ops/import_render.h"
 #include "ops/locks.h"
+#include "ops/publish.h"
+#include "ops/sync.h"
 #include "ops/query.h"
 #include "ops/tests.h"
 #include "ops/verify.h"
@@ -138,6 +140,13 @@ json McpServer::tool_list() {
            {{"id", prop("integer", "History id")}}, {"id"}),
       tool("hs_render", "Generate normal source files into a folder (for building, running, or git).",
            {{"out", prop("string", "Output folder (default 'out')")}}),
+      tool("hs_pull", "Fetch from the hub and fast-forward; also receives the hub's locks. Do this before starting work.",
+           {{"remote", prop("string", "Remote name (default 'origin')")}}),
+      tool("hs_push", "Send verified commits to the hub (run hs_verify and hs_commit first). Your locks travel with it.",
+           {{"remote", prop("string", "Remote name (default 'origin')")}}),
+      tool("hs_remotes", "Configured hubs (remotes)."),
+      tool("hs_publish", "Render the branch into the configured git working copy, commit and push it to git.",
+           {{"branch", prop("string", "Branch (default: current)")}}),
   });
 }
 
@@ -276,6 +285,18 @@ json McpServer::call_tool(const std::string& t, const json& a) {
     auto res = render_to(r, r.root() / from_utf8(a.value("out", "out")));
     return {{"written", res.written}, {"unchanged", res.unchanged}, {"deleted", res.deleted}};
   }
+  if (t == "hs_pull" || t == "hs_push") {
+    std::string remote = a.value("remote", "origin");
+    auto hub = open_remote(r, remote);
+    return t == "hs_pull" ? pull(r, *hub, remote) : push(r, *hub, remote);
+  }
+  if (t == "hs_remotes") {
+    json out = json::object();
+    for (auto& [k, v] : r.store().refs_with_prefix("remote/"))
+      if (std::count(k.begin(), k.end(), '/') == 1) out[k.substr(7)] = v;
+    return out;
+  }
+  if (t == "hs_publish") return publish(r, a.value("branch", ""));
   throw std::runtime_error("unknown tool " + t);
 }
 

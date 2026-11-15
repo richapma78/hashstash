@@ -25,6 +25,9 @@ Hash finish_def(Store& s, const Language& lang, Def d);
 // A definition's own text, with child definitions left out.
 std::string own_text(const Def& d);
 
+// Records analysis for a definition that arrived without it (pull, push).
+void ensure_analyzed(Store& s, const Hash& def_hash, const Def& d);
+
 // Records analysis for a file's glue (module-level code), keyed by the file hash.
 void analyze_file(Store& s, const Hash& file_hash, const FileTrail& f);
 

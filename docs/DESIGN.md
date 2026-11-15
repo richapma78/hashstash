@@ -213,6 +213,72 @@ merge first.
 Received objects are staged until all their dependencies have arrived, as Unison's
 `temp_entity` tables do.
 
+### Protocol
+
+JSON over HTTP at `<hub>/api/p/<project>/<op>`, with an optional bearer token
+(`hshub --token` or `HS_HUB_TOKEN` on the hub, `HS_TOKEN` on the client):
+
+| op | purpose |
+|----|---------|
+| `create`, `refs` | make a project; read branch heads |
+| `missing` | given hashes, return the ones the hub lacks |
+| `put_objects` / `get_objects` | upload or download objects in batches (base64) |
+| `reachable` | objects reachable from a head, stopping at what the client already has |
+| `push` | move a branch head: compare-and-swap from `old` to `new` |
+| `lock`, `unlock`, `locks` | the shared lock service |
+
+A push is accepted only when:
+* the new commit's closure is complete on the hub;
+* it is a fast-forward of the hub's head;
+* it does not change a definition someone else holds a lock on;
+* the head has passed verification (`hs verify`). The hub can also rerun the tests
+  itself (`verify_on_push`).
+
+After a push the hub refreshes its index and graphs, so `hs_graph` and the other
+queries over MCP see the new code at once. `pull` downloads the reachable objects,
+fast-forwards and brings the hub's locks down into the local store (`origin` column).
+Merging diverged branches is the next milestone; for now `pull` refuses to proceed
+when the two sides have diverged.
+
+### Hub storage and scale
+
+`hshub` is written against two interfaces, `HubBackend` (projects, jobs) and
+`ProjectStore` (objects, refs, locks, verification records), in `src/hub/backend.h`.
+The first backend keeps one SQLite store per project, which suits one machine or a
+small team. The interfaces are shaped for the way GitHub and similar hosts scale:
+
+| data | small (now) | large |
+|------|-------------|-------|
+| objects (immutable, content-addressed) | SQLite per project | object store sharded by hash prefix (S3/GCS/Ceph, or a cluster of storage nodes like GitHub's Spokes); safe to cache and replicate anywhere because a hash never changes meaning |
+| refs (branch heads) | SQLite | Postgres or another transactional database; a push is one compare-and-swap row update |
+| locks | SQLite | Postgres or Redis, with lease expiry |
+| index and graphs | rebuilt per project | derived data: rebuilt by workers from the objects, then served from replicas or a search cluster |
+| jobs (publish, verify) | `hub.db` queue | a real queue (Postgres `SKIP LOCKED`, SQS, Redis streams) feeding worker pools |
+
+Because objects are immutable and every head move is a compare-and-swap, the HTTP
+servers hold no state and can run behind a load balancer in any number. The only
+thing that needs strong consistency is the ref and lock table.
+
+### Publishing to git ("nightly builds")
+
+The hub can render a branch and commit it to an ordinary git repository, so GitHub
+holds plain, buildable source files:
+
+```toml
+[publish]                       # in the hub project's .hs/config.toml
+git_dir = "../publish-wc"      # working copy (cloned or created on first use)
+remote  = "https://github.com/you/project.git"
+branch  = "nightly"
+on_push = true                  # publish after every accepted push
+```
+
+`hshub publish <project>` (or `hs publish` / `hs_publish` locally) renders the tree,
+replaces the files in the working copy, commits with the hashstash commit messages
+since the last publish and pushes. Recommended setup: publish on every verified push
+to a dedicated branch such as `nightly`, and put `hshub publish` on a schedule
+(Task Scheduler, cron) if you want one commit per day instead. Keep `main` for
+releases you choose to promote.
+
 ## 9. Commands (`hs`)
 
 ```
@@ -240,13 +306,24 @@ hs lock / unlock / locks
 hs graph callers|callees|reach|impact|path|unused|cycles|entry
 hs render [--out dir] [--at ref] generate source files
 hs mcp                           MCP server over stdio for this project
+hs remote add <name> <url> / hs remotes
+hs clone <url> [dir]             copy a hub project into a new local store
+hs push [remote]                 verified, fast-forward push; carries locks
+hs pull [remote]                 fast-forward pull; brings hub locks down
+hs publish [branch]              render and commit to the [publish] git repository
 
 Later milestones:
 hs branch / switch / merge
-hs remote add <name> <url>
-hs clone / fetch / pull / push
 hs fragment <name> <lines>       cut a fragment out of a large definition
-hs export-git <dir>              render into a git repository and commit
+```
+
+### Hub (`hshub`)
+
+```
+hshub serve --root <dir> [--port 7420] [--token T]   HTTP sync, locks, MCP at /mcp/<project>
+hshub create <project> --root <dir>
+hshub list --root <dir>
+hshub publish <project> --root <dir> [--branch b]
 ```
 
 ## 10. MCP tools
@@ -257,8 +334,14 @@ The same tool set is served by `hs mcp` (stdio, local project) and by `hshub`
 `hs_status`, `hs_find`, `hs_list`, `hs_view`, `hs_context`, `hs_graph`, `hs_lock`,
 `hs_unlock`, `hs_locks`, `hs_edit_def`, `hs_add_def`, `hs_delete_def`, `hs_tests`,
 `hs_link_tests`, `hs_unlink_tests`, `hs_missing_tests`, `hs_note`, `hs_why`, `hs_diff`,
-`hs_verify`, `hs_commit`, `hs_log`, `hs_history`, `hs_rollback`, `hs_render`.
-Coming with later milestones: `hs_fragment`, `hs_pull`, `hs_push`.
+`hs_verify`, `hs_commit`, `hs_log`, `hs_history`, `hs_rollback`, `hs_render`,
+`hs_remotes`, `hs_pull`, `hs_push`, `hs_publish`.
+Coming with later milestones: `hs_fragment`, `hs_merge`.
+
+An agent with only the local MCP server can therefore do the whole cycle: edit,
+verify, commit, push and pull. The hub's MCP endpoint (`POST /mcp/<project>`,
+session in the `Mcp-Session-Id` header) serves the same tools against the hosted
+copy, for agents that work without a local store.
 
 Edits through MCP require a `reason`, which becomes the definition's change context.
 Responses carry warnings for definitions over the review size limit and for
@@ -278,8 +361,9 @@ src/lang/      language adapters over tree-sitter: python, c, cpp
 src/ops/       import, render, edit/update, diff, merge, locks, graph, sync
 src/mcp/       MCP protocol and tool definitions
 src/cli/       hs
-src/hub/       hshub
-tests/         unit tests and round-trip fixtures
+src/hub/       hub service, storage interfaces, SQLite backend
+src/server/    hshub (HTTP server, job worker)
+tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub.sh
 ```
 
 ## 12. Milestones
@@ -289,7 +373,11 @@ tests/         unit tests and round-trip fixtures
    `diff`, size warnings, local locks, tests per definition, verify, lifecycle
    history and rollback, notes and context. *(done)*
 2. **Agents.** `hs mcp` with the full tool set *(done)*; fragments and crumbs.
-3. **Hub.** `hshub` with sync, hard locks over the network, branches and merge, MCP over HTTP.
-4. **C and C++.** Adapters for preprocessor blocks, header/source pairs and overloads.
-5. **Git bridge.** `export-git` and incremental git mirroring.
-6. **Graphical editor.** Shows the store as readable code with live graphs, edits through the same library.
+3. **Hub.** `hshub` with sync, hard locks over the network and MCP over HTTP
+   *(done)*; branches and merge next.
+4. **C and C++.** Adapter for functions, records, namespaces, templates and
+   preprocessor blocks *(done)*; header/source pairing and overloads next.
+5. **Git bridge.** Publish rendered branches to git *(done)*; incremental mirroring.
+6. **Scale.** Object store, Postgres refs and locks, queue-backed workers behind the
+   same interfaces.
+7. **Graphical editor.** Shows the store as readable code with live graphs, edits through the same library.

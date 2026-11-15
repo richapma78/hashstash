@@ -38,7 +38,7 @@ void fix_lineage(const Store& s, Namespace& ns) {
 namespace {
 
 struct Node {
-  std::string qname, file, path, parent, kind, hash;
+  std::string qname, file, path, parent, kind, hash, lang;
 };
 
 std::vector<std::string> split_dots(const std::string& s) {
@@ -166,6 +166,53 @@ struct Resolver {
     std::string confidence;
   };
 
+  // C++: definitions by their last name segment ("demo.Shape::normalize" -> "normalize").
+  std::unordered_map<std::string, std::vector<std::string>> cpp_by_short;
+
+  static std::string cpp_short(const std::string& s) {
+    std::string last = s.substr(s.rfind('.') + 1);
+    size_t c = last.rfind("::");
+    if (c != std::string::npos) last = last.substr(c + 2);
+    return last.substr(0, last.find('~') == 0 ? std::string::npos : last.find('~'));
+  }
+
+  template <class Exact>
+  std::vector<Hit> resolve_cpp(const Node& caller, const std::string& name, Exact exact) {
+    // Enclosing scopes of the caller, innermost first: "demo.Shape::f" gives
+    // "demo.Shape", "demo", "". Each is tried as a prefix of the called name.
+    std::vector<std::string> scopes;
+    std::string p = caller.path;
+    while (true) {
+      size_t dot = p.rfind('.'), colons = p.rfind("::");
+      size_t cut = std::string::npos;
+      if (dot != std::string::npos && (colons == std::string::npos || dot > colons)) cut = dot;
+      else if (colons != std::string::npos) cut = colons;
+      if (cut == std::string::npos) break;
+      p = p.substr(0, cut);
+      scopes.push_back(p);
+    }
+    // "Shape::f" also scopes to its class written inside the same namespace.
+    std::string own = caller.path.substr(caller.path.rfind('.') + 1);
+    if (own.find("::") != std::string::npos) {
+      std::string cls = own.substr(0, own.rfind("::"));
+      std::string ns = caller.path.size() > own.size() ? caller.path.substr(0, caller.path.size() - own.size() - 1) : "";
+      scopes.insert(scopes.begin(), ns.empty() ? cls : ns + "." + cls);
+    }
+    scopes.push_back("");
+    std::string dotted = name;
+    for (size_t c; (c = dotted.find("::")) != std::string::npos;) dotted.replace(c, 2, ".");
+    for (auto& sc : scopes) {
+      for (const std::string& n : {name, dotted}) {
+        std::string path = sc.empty() ? n : sc + "." + n;
+        if (auto h = exact(caller.file, path)) return {*h};
+      }
+      // A member declared in class "demo.Shape" but defined as "demo.Shape::name".
+      if (!sc.empty())
+        if (auto h = exact(caller.file, sc + "::" + name)) return {*h};
+    }
+    return by_short(cpp_by_short, cpp_short(dotted));
+  }
+
   std::vector<Hit> by_short(const std::unordered_map<std::string, std::vector<std::string>>& index,
                             const std::string& name) {
     auto it = index.find(name);
@@ -184,6 +231,7 @@ struct Resolver {
       if (it == by_file_path.end()) return std::nullopt;
       return Hit{it->second, "exact"};
     };
+    if (caller.lang == "cpp") return resolve_cpp(caller, name, exact);
     if (parts.size() == 1) {
       if (auto h = exact(caller.file, name)) return {*h};
       auto a = alias.find(name);
@@ -235,6 +283,7 @@ void rebuild_index(Repo& repo) {
     Resolver r;
     r.nodes.reserve(flat.size() + ns.files.size());
     for (auto& f : flat) {
+      ensure_analyzed(s, f.hash, f.def);
       ins.bind(1, f.qname).bind(2, f.def.name).bind(3, f.file).bind(4, f.hash).bind(5, f.lineage)
           .bind(6, f.def.kind).bind(7, f.def.lang).bind(8, f.parent).bind(9, (long long)f.seq).run();
       ins.reset();
@@ -247,7 +296,7 @@ void rebuild_index(Repo& repo) {
       info.reset();
       fts.bind(1, f.qname).bind(2, f.def.name).bind(3, sig).bind(4, doc).run();
       fts.reset();
-      r.nodes.push_back({f.qname, f.file, f.path, f.parent, f.def.kind, f.hash});
+      r.nodes.push_back({f.qname, f.file, f.path, f.parent, f.def.kind, f.hash, f.def.lang});
     }
     for (auto& [path, e] : ns.files) {
       if (e.kind != "file") continue;
@@ -257,7 +306,7 @@ void rebuild_index(Repo& repo) {
       ins.bind(1, q).bind(2, "<module>").bind(3, path).bind(4, e.hash).bind(5, "")
           .bind(6, "module").bind(7, ft.lang).bind(8, "").bind(9, -1LL).run();
       ins.reset();
-      r.nodes.push_back({q, path, "<module>", "", "module", e.hash});
+      r.nodes.push_back({q, path, "<module>", "", "module", e.hash, ft.lang});
       for (auto& m : module_names(path)) r.files_by_module[m].push_back(path);
     }
     for (auto& n : r.nodes) {
@@ -265,6 +314,10 @@ void rebuild_index(Repo& repo) {
       if (n.kind == "module") continue;
       r.by_file_path[{n.file, n.path}] = n.qname;
       std::string shortname = n.path.substr(n.path.rfind('.') + 1);
+      if (n.lang == "cpp") {
+        if (n.kind != "namespace") r.cpp_by_short[r.cpp_short(n.path)].push_back(n.qname);
+        continue;
+      }
       if (n.parent.empty()) r.top_by_short[n.path].push_back(n.qname);
       else r.member_by_short[shortname].push_back(n.qname);
     }

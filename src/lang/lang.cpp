@@ -5,11 +5,13 @@
 namespace hs {
 
 std::unique_ptr<Language> make_python();
+std::unique_ptr<Language> make_cpp();
 
 const std::vector<std::unique_ptr<Language>>& languages() {
   static std::vector<std::unique_ptr<Language>> all = [] {
     std::vector<std::unique_ptr<Language>> v;
     v.push_back(make_python());
+    v.push_back(make_cpp());
     return v;
   }();
   return all;

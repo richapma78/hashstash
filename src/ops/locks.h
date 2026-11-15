@@ -27,6 +27,11 @@ std::vector<LockInfo> list_locks(Repo& repo);                             // une
 // Nullopt if the current agent may change target, else the blocking lock.
 std::optional<LockInfo> blocking_lock(Repo& repo, const std::string& target);
 void renew_locks(Repo& repo);
+
+// Called on every acquire/release so a configured hub takes the lock too
+// (set by the sync module). Throws to refuse.
+using RemoteLockHook = void (*)(Repo&, const LockInfo&, bool acquire, bool force);
+void set_remote_lock_hook(RemoteLockHook hook);
 int release_all(Repo& repo);  // releases every lock the current agent holds
 
 }  // namespace hs

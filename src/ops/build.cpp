@@ -78,6 +78,13 @@ Hash finish_def(Store& s, const Language& lang, Def d) {
   return h;
 }
 
+void ensure_analyzed(Store& s, const Hash& def_hash, const Def& d) {
+  if (already_analyzed(s, def_hash)) return;
+  const Language* lang = language_by_name(d.lang);
+  if (!lang) return;
+  record_analysis(s, def_hash, lang->analyze(own_text(d)), &d);
+}
+
 void analyze_file(Store& s, const Hash& file_hash, const FileTrail& f) {
   if (already_analyzed(s, file_hash)) return;
   const Language* lang = language_by_name(f.lang);

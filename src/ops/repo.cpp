@@ -48,6 +48,13 @@ keep = 500        # lifecycle steps kept per branch for rollback (0 = keep all)
 
 [import]
 # ignore = ["*.min.js", "data/**"]
+
+[publish]
+# Render each published branch into a git working copy, commit, and push.
+# git_dir = "../myproject-git"   # created (git init / clone) if missing
+# remote  = "origin"             # remote name or URL; empty = commit only
+# branch  = "main"
+# on_push = false                # hub: publish after every accepted push
 )";
 
 std::unique_ptr<Repo> Repo::init(const fs::path& root, const std::string& name) {
@@ -118,6 +125,10 @@ void Repo::load_config() {
     else if (key == "tests.require") config_.tests_require = unquote(val);
     else if (key == "tests.python") config_.test_command_python = unquote(val);
     else if (key == "history.keep") num(config_.history_keep);
+    else if (key == "publish.git_dir") config_.publish_git_dir = unquote(val);
+    else if (key == "publish.remote") config_.publish_remote = unquote(val);
+    else if (key == "publish.branch") config_.publish_branch = unquote(val);
+    else if (key == "publish.on_push") config_.publish_on_push = unquote(val) == "true";
     else if ((key == "import.ignore" || key == "tests.exempt") && val.size() >= 2 && val.front() == '[') {
       auto& list = key == "import.ignore" ? config_.ignore : config_.tests_exempt;
       std::string body = val.substr(1, val.rfind(']') - 1);

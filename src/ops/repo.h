@@ -26,6 +26,11 @@ struct Config {
   std::vector<std::string> tests_exempt;   // short-name globs that need no tests
   std::string test_command_python = "python -m pytest -q {tests}";
   int history_keep = 500;                  // lifecycle entries kept per branch (0 = all)
+  // [publish]: render into a git working copy, commit and push.
+  std::string publish_git_dir;             // relative to the project root, or absolute
+  std::string publish_remote;              // git remote name or URL ("" = commit only)
+  std::string publish_branch = "main";     // git branch to publish to
+  bool publish_on_push = false;            // hub: publish after every accepted push
 };
 
 class Repo {

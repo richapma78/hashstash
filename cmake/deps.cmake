@@ -19,7 +19,13 @@ FetchContent_Declare(ts_python
 FetchContent_Declare(nljson
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/include.zip
   DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR _none_)
-FetchContent_MakeAvailable(sqlite blake3 treesitter ts_python nljson)
+FetchContent_Declare(ts_cpp
+  URL https://github.com/tree-sitter/tree-sitter-cpp/archive/refs/tags/v0.23.4.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR _none_)
+FetchContent_Declare(httplib
+  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.3.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR _none_)
+FetchContent_MakeAvailable(sqlite blake3 treesitter ts_python ts_cpp nljson httplib)
 
 # SQLite with full-text search
 add_library(hs_sqlite STATIC ${sqlite_SOURCE_DIR}/sqlite3.c)
@@ -40,10 +46,23 @@ target_compile_definitions(hs_blake3 PRIVATE
 add_library(hs_treesitter STATIC
   ${treesitter_SOURCE_DIR}/lib/src/lib.c
   ${ts_python_SOURCE_DIR}/src/parser.c
-  ${ts_python_SOURCE_DIR}/src/scanner.c)
+  ${ts_python_SOURCE_DIR}/src/scanner.c
+  ${ts_cpp_SOURCE_DIR}/src/parser.c
+  ${ts_cpp_SOURCE_DIR}/src/scanner.c)
 target_include_directories(hs_treesitter
   PUBLIC ${treesitter_SOURCE_DIR}/lib/include
   PRIVATE ${treesitter_SOURCE_DIR}/lib/src ${ts_python_SOURCE_DIR}/src)
+# Both grammars ship src/tree_sitter/parser.h; give each scanner its own.
+set_source_files_properties(${ts_cpp_SOURCE_DIR}/src/parser.c ${ts_cpp_SOURCE_DIR}/src/scanner.c
+  PROPERTIES INCLUDE_DIRECTORIES ${ts_cpp_SOURCE_DIR}/src)
+
+# cpp-httplib (header only) for hshub and hs sync
+add_library(hs_httplib INTERFACE)
+target_include_directories(hs_httplib INTERFACE ${httplib_SOURCE_DIR})
+if(WIN32)
+  target_compile_definitions(hs_httplib INTERFACE _WIN32_WINNT=0x0A00)
+  target_link_libraries(hs_httplib INTERFACE ws2_32 crypt32)
+endif()
 if(NOT MSVC)
   target_compile_options(hs_treesitter PRIVATE -w)
 endif()

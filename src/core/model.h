@@ -110,6 +110,10 @@ FileTrail load_file(const Store& s, const Hash& h);
 Namespace load_namespace(const Store& s, const Hash& h);
 Commit load_commit(const Store& s, const Hash& h);
 
+// Hashes an object refers to (commit -> namespace + parents, namespace -> files
+// and attachments, file/def -> definitions and fragments).
+std::vector<Hash> object_refs(const Object& o);
+
 // Full source text, with child definitions and fragments expanded in place.
 std::string render_parts(const Store& s, const std::vector<Part>& parts);
 std::string render_def(const Store& s, const Hash& h);

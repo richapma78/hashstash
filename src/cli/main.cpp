@@ -11,6 +11,8 @@
 #include "ops/history.h"
 #include "ops/import_render.h"
 #include "ops/locks.h"
+#include "ops/publish.h"
+#include "ops/sync.h"
 #include "ops/query.h"
 #include "ops/repo.h"
 #include "ops/tests.h"
@@ -77,6 +79,14 @@ Call graph
   hs graph callers|callees|reach|impact <name> [--depth N]
   hs graph path <from> <to>
   hs graph unused | cycles | entry
+
+Hub (hshub)
+  hs remote add <name> <url>          e.g. hs remote add origin http://localhost:7420/myproject
+  hs clone <url> [dir]                copy a hub project
+  hs push [remote] [branch]           send verified commits (and your locks) to the hub
+  hs pull [remote] [branch]           fast-forward from the hub (and receive its locks)
+  hs publish [branch]                 render into the [publish] git working copy, commit, push
+  With remote "origin" set, locks are taken on the hub too (HS_OFFLINE=1 to skip).
 
 Agents
   hs mcp                              MCP server over stdio for this project
@@ -231,7 +241,7 @@ int cmd_ls(Repo& repo, const Args& a) {
   for (auto& r : rows) {
     int depth = (int)std::count(r.qname.begin() + r.qname.find(':'), r.qname.end(), '.');
     std::string kind = r.kind;
-    kind.resize(9, ' ');
+    kind.resize(10, ' ');
     std::cout << short_hash(r.hash, 8) << "  " << kind << std::string(depth * 2, ' ') << r.qname << "\n";
   }
   return 0;
@@ -406,8 +416,10 @@ int cmd_diff(Repo& repo, const Args& a) {
 int cmd_commit(Repo& repo, const Args& a) {
   auto r = commit(repo, a.get("-m"), a.has("--keep-locks"));
   if (g_json) return out_json({{"commit", r.commit}, {"changes", diff_to_json(repo.store(), r.diff, false)}}), 0;
-  std::cout << "Committed #" << short_hash(r.commit) << " on " << repo.branch() << "\n"
-            << diff_to_text(repo.store(), r.diff, false);
+  std::cout << "Committed #" << short_hash(r.commit) << " on " << repo.branch() << "\n";
+  auto lines = split_lines(diff_to_text(repo.store(), r.diff, false));
+  for (size_t i = 0; i < lines.size() && i < 25; ++i) std::cout << lines[i];
+  if (lines.size() > 25) std::cout << "  ... and " << lines.size() - 25 << " more (hs log --json for all)\n";
   if (r.locks_released) std::cout << "Released " << r.locks_released << " lock(s).\n";
   if (verification_status(repo, load_commit(repo.store(), r.commit).ns) != "passed")
     std::cout << "Not verified yet: run hs verify before pushing.\n";
@@ -423,8 +435,12 @@ int cmd_log(Repo& repo, const Args& a) {
     std::cout << "#" << c["commit"].get<std::string>() << "  " << c["time"].get<std::string>() << "  "
               << c["author"].get<std::string>() << "\n    " << c["message"].get<std::string>() << "\n";
     if (c.contains("change")) std::cout << "    " << c["change"].get<std::string>() << " " << c["name"].get<std::string>() << "\n";
-    if (c.contains("changes"))
-      for (auto& x : c["changes"]) std::cout << "    " << x.get<std::string>() << "\n";
+    if (c.contains("changes")) {
+      size_t shown = 0;
+      for (auto& x : c["changes"])
+        if (shown++ < 10) std::cout << "    " << x.get<std::string>() << "\n";
+      if (shown > 10) std::cout << "    ... and " << shown - 10 << " more\n";
+    }
   }
   if (j.empty()) std::cout << "No commits.\n";
   return 0;
@@ -575,6 +591,66 @@ int cmd_locks(Repo& repo, const Args&) {
   return 0;
 }
 
+int cmd_remote(Repo& repo, const Args& a) {
+  if (a.pos.size() >= 4 && a.pos[1] == "add") {
+    set_remote(repo, a.pos[2], a.pos[3]);
+    std::cout << "Remote " << a.pos[2] << " -> " << a.pos[3] << "\n";
+    return 0;
+  }
+  for (auto& [k, v] : repo.store().refs_with_prefix("remote/"))
+    if (std::count(k.begin(), k.end(), '/') == 1) std::cout << k.substr(7) << "  " << v << "\n";
+  return 0;
+}
+
+int cmd_push(Repo& repo, const Args& a) {
+  std::string remote = a.pos.size() > 1 ? a.pos[1] : "origin";
+  auto hub = open_remote(repo, remote);
+  json r = push(repo, *hub, remote, a.pos.size() > 2 ? a.pos[2] : "");
+  if (g_json) return out_json(r), 0;
+  if (r.contains("note")) std::cout << r["note"].get<std::string>() << "\n";
+  else
+    std::cout << "Pushed " << r["branch"].get<std::string>() << " #" << short_hash(r["head"]) << " to " << remote
+              << " (" << r["uploaded"] << " objects uploaded).\n";
+  return 0;
+}
+
+int cmd_pull(Repo& repo, const Args& a) {
+  std::string remote = a.pos.size() > 1 ? a.pos[1] : "origin";
+  auto hub = open_remote(repo, remote);
+  json r = pull(repo, *hub, remote, a.pos.size() > 2 ? a.pos[2] : "");
+  if (g_json) return out_json(r), 0;
+  std::cout << (r.contains("result") ? r["result"].get<std::string>() : r.value("note", std::string("done")));
+  if (r.contains("fetched")) std::cout << " (" << r["fetched"] << " objects fetched, " << r["locks"] << " hub locks)";
+  std::cout << "\n";
+  return 0;
+}
+
+int cmd_clone(const Args& a) {
+  need(a, 2, "clone <http://host:port/project> [dir]");
+  std::string url = a.pos[1];
+  std::string name = url.substr(url.find_last_of('/') + 1);
+  fs::path dir = a.pos.size() > 2 ? from_utf8(a.pos[2]) : from_utf8(name);
+  fs::create_directories(dir);
+  auto repo = Repo::init(dir, name);
+  if (a.has("--as")) repo->set_agent(a.get("--as"));
+  set_remote(*repo, "origin", url);
+  auto hub = open_remote(*repo, "origin");
+  json r = pull(*repo, *hub, "origin", "main");
+  std::cout << "Cloned " << url << " into " << to_generic(fs::absolute(dir)) << ": "
+            << r.value("result", r.value("note", std::string("empty"))) << "\n";
+  return 0;
+}
+
+int cmd_publish(Repo& repo, const Args& a) {
+  json r = publish(repo, a.pos.size() > 1 ? a.pos[1] : "");
+  if (g_json) return out_json(r), 0;
+  std::cout << "Published #" << r["commit"].get<std::string>() << " to " << r["dir"].get<std::string>() << ": "
+            << r["written"] << " files written, " << r["deleted"] << " deleted"
+            << (r.contains("git_commit") ? ", git commit " + r["git_commit"].get<std::string>() : ", no changes")
+            << (r.contains("pushed") ? ", pushed to " + r["pushed"].get<std::string>() : "") << ".\n";
+  return 0;
+}
+
 int cmd_graph(Repo& repo, const Args& a) {
   need(a, 2, "graph callers|callees|reach|impact|path|unused|cycles|entry ...");
   const std::string& q = a.pos[1];
@@ -641,6 +717,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (cmd == "init") return cmd_init(a);
+    if (cmd == "clone") return cmd_clone(a);
     auto repo = Repo::open(fs::current_path());
     if (a.has("--as")) repo->set_agent(a.get("--as"));
     if (cmd == "import") return cmd_import(*repo, a);
@@ -667,6 +744,10 @@ int main(int argc, char** argv) {
     if (cmd == "unlock") return cmd_lock(*repo, a, false);
     if (cmd == "locks") return cmd_locks(*repo, a);
     if (cmd == "graph") return cmd_graph(*repo, a);
+    if (cmd == "remote") return cmd_remote(*repo, a);
+    if (cmd == "push") return cmd_push(*repo, a);
+    if (cmd == "pull") return cmd_pull(*repo, a);
+    if (cmd == "publish") return cmd_publish(*repo, a);
     if (cmd == "mcp") {
 #ifdef _WIN32
       _setmode(_fileno(stdout), _O_BINARY);

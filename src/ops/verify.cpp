@@ -9,40 +9,12 @@
 #include "ops/query.h"
 #include "ops/tests.h"
 
-#ifdef _WIN32
-#define popen _popen
-#define pclose _pclose
-#else
-#include <sys/wait.h>
-#endif
-
 namespace hs {
 
 namespace {
 
-struct RunResult {
-  int code = -1;
-  std::string output;
-};
-
 RunResult run_in(const fs::path& dir, const std::string& command) {
-#ifdef _WIN32
-  std::string cmd = "cd /d \"" + dir.string() + "\" && " + command + " 2>&1";
-#else
-  std::string cmd = "cd '" + dir.string() + "' && " + command + " 2>&1";
-#endif
-  RunResult r;
-  FILE* p = popen(cmd.c_str(), "r");
-  if (!p) return r;
-  char buf[4096];
-  size_t n;
-  while ((n = fread(buf, 1, sizeof buf, p)) > 0) r.output.append(buf, n);
-  int status = pclose(p);
-#ifdef _WIN32
-  r.code = status;
-#else
-  r.code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-#endif
+  RunResult r = run_command(dir, command);
   if (r.output.size() > 8000) r.output = "..." + r.output.substr(r.output.size() - 8000);
   return r;
 }
@@ -109,6 +81,7 @@ nlohmann::json verify(Repo& repo, bool all) {
     (repo.config().tests_require == "block" ? failures : warnings).push_back(j);
   }
   for (auto& t : targets) {
+    if (t.kind == "namespace") continue;
     Stmt st(s.db(), "SELECT lines FROM def_info WHERE hash = ?");
     st.bind(1, t.hash);
     if (!st.step()) continue;

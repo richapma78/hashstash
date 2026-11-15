@@ -4,6 +4,9 @@
 
 namespace hs {
 
+static RemoteLockHook g_hook = nullptr;
+void set_remote_lock_hook(RemoteLockHook hook) { g_hook = hook; }
+
 static LockInfo read_lock(Stmt& st) {
   return LockInfo{st.text(0), st.text(1), st.text(2), st.integer(3), st.integer(4)};
 }
@@ -29,6 +32,7 @@ LockInfo acquire_lock(Repo& repo, const std::string& target, const std::string& 
       throw std::runtime_error(name + " is locked by " + b->holder + " until " + format_time(b->expires));
     long long now = now_seconds();
     info = LockInfo{target, name, repo.agent(), now, now + 60LL * repo.config().lock_minutes};
+    if (g_hook) g_hook(repo, info, true, false);  // the hub must agree first
     Stmt st(repo.store().db(),
             "INSERT INTO lock(target, name, holder, acquired, expires) VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(target) DO UPDATE SET name = excluded.name, holder = excluded.holder, "
@@ -43,6 +47,13 @@ bool release_lock(Repo& repo, const std::string& target, bool force) {
   if (!l) return false;
   if (!force && l->holder != repo.agent())
     throw std::runtime_error(l->name + " is locked by " + l->holder + " (use --force to break it)");
+  if (g_hook) {
+    try {
+      g_hook(repo, *l, false, force);
+    } catch (std::exception&) {
+      // Hub unreachable: release locally; the hub lease expires on its own.
+    }
+  }
   Stmt st(repo.store().db(), "DELETE FROM lock WHERE target = ?");
   st.bind(1, target).run();
   return true;

@@ -181,6 +181,11 @@ Store::Store(const std::string& db_path) {
   sqlite3_busy_timeout(db_, 10000);
   exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
   exec(kSchema);
+  // Migrations for stores created by earlier versions.
+  try {
+    exec("ALTER TABLE lock ADD COLUMN origin TEXT NOT NULL DEFAULT ''");  // '' = local, else remote name
+  } catch (...) {
+  }
   exec("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')");
 }
 

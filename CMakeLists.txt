@@ -12,10 +12,10 @@ include(cmake/deps.cmake)
 
 # ---- core library -----------------------------------------------------------
 file(GLOB_RECURSE HS_LIB_SOURCES CONFIGURE_DEPENDS
-  src/core/*.cpp src/lang/*.cpp src/ops/*.cpp src/mcp/*.cpp)
+  src/core/*.cpp src/lang/*.cpp src/ops/*.cpp src/mcp/*.cpp src/hub/*.cpp)
 add_library(hashstash STATIC ${HS_LIB_SOURCES})
 target_include_directories(hashstash PUBLIC src)
-target_link_libraries(hashstash PUBLIC hs_sqlite hs_blake3 hs_treesitter hs_json)
+target_link_libraries(hashstash PUBLIC hs_sqlite hs_blake3 hs_treesitter hs_json hs_httplib)
 target_compile_definitions(hashstash PUBLIC HS_VERSION="${PROJECT_VERSION}")
 if(MSVC)
   target_compile_options(hashstash PRIVATE /W4 /utf-8)
@@ -31,6 +31,12 @@ add_executable(hs src/cli/main.cpp)
 target_link_libraries(hs PRIVATE hashstash)
 if(MINGW)
   target_link_options(hs PRIVATE -static)
+endif()
+
+add_executable(hshub src/server/main.cpp)
+target_link_libraries(hshub PRIVATE hashstash)
+if(MINGW)
+  target_link_options(hshub PRIVATE -static)
 endif()
 
 # ---- tests ------------------------------------------------------------------
