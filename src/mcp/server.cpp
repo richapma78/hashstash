@@ -1,7 +1,10 @@
 #include "mcp/server.h"
 
+#include <atomic>
 #include <cstdlib>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "ops/context.h"
 #include "ops/diff.h"
@@ -15,6 +18,7 @@
 #include "ops/review.h"
 #include "ops/tests.h"
 #include "ops/verify.h"
+#include "ops/work.h"
 
 namespace hs {
 
@@ -27,7 +31,12 @@ static const char* kInstructions =
     "context history, tests, callers, callees, change log); hs_lock it; hs_edit_def with the new "
     "code and a reason; add or link test cases (every function and method needs its own tests); "
     "hs_verify; hs_commit with a description of what changed, check the diff it returns, then "
-    "hs_review your commit. Keep definitions small: responses "
+    "hs_review your commit. Many agents share this code: hs_work start the feature or bug you are "
+    "on first (locks and requests show it). If a definition is locked, don't wait: hs_request the "
+    "change you need (the holder makes it before committing) or queue for the lock. hs_commit refuses "
+    "while others' requests are open on what you changed: hs_request_respond accept (adds their "
+    "tests), make the change, hs_verify, then hs_commit with resolves. hs_inbox tells you when "
+    "your requests are answered or done. Keep definitions small: responses "
     "warn when one grows past the review limit, so split it into helpers. Names can be "
     "'file.py:Class.method', 'module.Class.method', or a unique short name.";
 
@@ -134,8 +143,50 @@ json McpServer::tool_list() {
            {{"all", prop("boolean", "Check every definition")}}),
       tool("hs_commit",
            "Commit the working state. The message must describe what changed and why. Returns the "
-           "line-by-line diff it committed (capped; hs_show for the rest) so you can confirm it.",
-           {{"message", prop("string", "Description of the change")}}, {"message"}),
+           "line-by-line diff it committed (capped; hs_show for the rest) so you can confirm it. "
+           "Refused while other agents' change requests are open on definitions you changed, unless "
+           "resolves lists them (make their change first) or you decline them.",
+           {{"message", prop("string", "Description of the change")},
+            {"resolves", {{"type", "array"}, {"items", {{"type", "integer"}}},
+                          {"description", "Ids of requests this commit makes the change for"}}}},
+           {"message"}),
+      tool("hs_work",
+           "Your work item: the feature, bug fix or chore your locks, requests and commits are for. "
+           "action start (id, title for a new one, kind, priority, link), status (default: your item, "
+           "locks, requests to and from you), list, done, abandon.",
+           {{"action", {{"type", "string"}, {"enum", {"status", "start", "list", "done", "abandon"}}}},
+            {"id", prop("string", "Work item id, e.g. FEAT-12 or BUG-7")},
+            {"title", prop("string", "What it is for")},
+            {"kind", {{"type", "string"}, {"enum", {"feature", "bug", "chore"}}}},
+            {"priority", prop("integer", "Higher goes first in lock queues (default bug 2, feature 1, chore 0)")},
+            {"link", prop("string", "Ticket URL")},
+            {"all", prop("boolean", "list: include closed items")}}),
+      tool("hs_request",
+           "A definition you need is locked by another agent: log what you need instead of waiting. "
+           "kind change (default): the holder must make your change (or decline) before committing it; "
+           "give test code and its file and they become tests of the definition, so both agents' "
+           "tests must pass. kind lock: queue for the lock; it is yours when released. hs_inbox "
+           "tells you when it is done.",
+           {{"name", name}, {"need", prop("string", "The change you need, precisely")},
+            {"kind", {{"type", "string"}, {"enum", {"change", "lock"}}}},
+            {"test_file", prop("string", "File for the test code, e.g. tests/test_ops.py")},
+            {"test_code", prop("string", "Test functions that must pass after the change")}},
+           {"name"}),
+      tool("hs_requests", "Open requests to and from you (all: everyone's; closed: include finished ones).",
+           {{"all", prop("boolean", "Everyone's")}, {"closed", prop("boolean", "Include finished")}}),
+      tool("hs_request_respond",
+           "Answer a request: accept (adds the requester's tests and links them; then make the change and "
+           "hs_commit with resolves), decline (with a reason; the requester is queued for the lock), "
+           "or cancel one of your own.",
+           {{"id", prop("integer", "Request id")},
+            {"action", {{"type", "string"}, {"enum", {"accept", "decline", "cancel"}}}},
+            {"reason", prop("string", "Why (needed to decline)")}},
+           {"id", "action"}),
+      tool("hs_inbox",
+           "Your events since you last looked: requests on what you hold, answers to yours, locks handed "
+           "to you, requests done (pull to get the change). wait: seconds to wait for one.",
+           {{"wait", prop("integer", "Seconds to wait if there is nothing yet (max 60)")},
+            {"peek", prop("boolean", "Don't mark them as seen")}}),
       tool("hs_show",
            "Review one commit: message, author, verification, review flag (unreviewed / AI / human), "
            "line-by-line diff of every changed function and module code, per-function test summary "
@@ -186,9 +237,20 @@ json McpServer::call_tool(const std::string& t, const json& a) {
     Store& s = r.store();
     auto d = diff_namespaces(s, load_namespace(s, r.head_ns_hash()), r.work_ns());
     json locks = json::array();
-    for (auto& l : list_locks(r)) locks.push_back({{"name", l.name}, {"holder", l.holder}, {"until", format_time(l.expires)}});
-    return {{"branch", r.branch()}, {"agent", r.agent()}, {"changes", diff_to_json(s, d, false)},
-            {"locks", locks}, {"verified", verification_status(r, r.work_ns_hash())}};
+    for (auto& l : list_locks(r))
+      locks.push_back({{"name", l.name}, {"holder", l.holder}, {"work", l.work}, {"until", format_time(l.expires)}});
+    json j = {{"branch", r.branch()}, {"agent", r.agent()}, {"changes", diff_to_json(s, d, false)},
+              {"locks", locks}, {"verified", verification_status(r, r.work_ns_hash())}};
+    try {
+      json w = work_status(r);
+      j["work"] = w["work"];
+      j["requests_for_you"] = w["requests_for_you"];
+      j["your_requests"] = w["your_requests"];
+      j["inbox"] = w["inbox"];
+    } catch (std::exception& e) {
+      j["work"] = std::string("unavailable: ") + e.what();
+    }
+    return j;
   }
   if (t == "hs_find") return find(r, need_str(a, "query"));
   if (t == "hs_list") {
@@ -231,7 +293,72 @@ json McpServer::call_tool(const std::string& t, const json& a) {
   }
   if (t == "hs_locks") {
     json out = json::array();
-    for (auto& l : list_locks(r)) out.push_back({{"name", l.name}, {"holder", l.holder}, {"until", format_time(l.expires)}});
+    for (auto& l : list_locks(r))
+      out.push_back({{"name", l.name}, {"holder", l.holder}, {"work", l.work}, {"until", format_time(l.expires)}});
+    return out;
+  }
+  if (t == "hs_work") {
+    std::string action = a.value("action", "status");
+    if (action == "status") return work_status(r);
+    if (action == "start") {
+      WorkItem w;
+      w.id = need_str(a, "id");
+      w.title = a.value("title", "");
+      w.kind = a.value("kind", "");
+      w.link = a.value("link", "");
+      if (a.contains("priority")) w.priority = a["priority"].get<int>();
+      return start_work(r, w).to_json();
+    }
+    if (action == "list") {
+      json out = json::array();
+      for (auto& w : coordination(r)->works(a.value("all", false))) out.push_back(w.to_json());
+      return out;
+    }
+    if (action == "done" || action == "abandon")
+      return finish_work(r, a.value("id", ""), action == "done" ? "done" : "abandoned").to_json();
+    throw std::runtime_error("unknown hs_work action " + action);
+  }
+  if (t == "hs_request") {
+    Request q = make_request(r, need_str(a, "name"), a.value("kind", "change"), a.value("need", ""),
+                             a.value("test_file", ""), a.value("test_code", ""));
+    json j = q.to_json();
+    j["summary"] = describe_request(q);
+    j["next"] = q.kind == "lock" ? "you get the lock when it is released; hs_inbox tells you"
+                                 : q.holder + " is told and must deal with it before committing " + q.name +
+                                       "; hs_inbox tells you when it is done";
+    return j;
+  }
+  if (t == "hs_requests") {
+    RequestFilter f;
+    if (!a.value("all", false)) f.agent = r.agent();
+    f.open_only = !a.value("closed", false);
+    json out = json::array();
+    for (auto& q : coordination(r)->requests(f)) {
+      json j = q.to_json();
+      j["summary"] = describe_request(q);
+      out.push_back(j);
+    }
+    return out;
+  }
+  if (t == "hs_request_respond") {
+    long long id = a.value("id", 0LL);
+    std::string action = need_str(a, "action");
+    Request q = action == "accept"    ? accept_request(r, id)
+                : action == "decline" ? decline_request(r, id, a.value("reason", ""))
+                : action == "cancel"  ? cancel_request(r, id)
+                                      : throw std::runtime_error("action must be accept, decline or cancel");
+    json j = q.to_json();
+    j["summary"] = describe_request(q);
+    if (action == "accept") j["next"] = "make the change, hs_verify, then hs_commit with resolves [" + std::to_string(id) + "]";
+    return j;
+  }
+  if (t == "hs_inbox") {
+    json out = json::array();
+    for (auto& e : inbox(r, !a.value("peek", false), std::min(a.value("wait", 0), 60))) {
+      json j = e.to_json();
+      j["text"] = describe_event(e);
+      out.push_back(j);
+    }
     return out;
   }
   if (t == "hs_edit_def") {
@@ -299,8 +426,23 @@ json McpServer::call_tool(const std::string& t, const json& a) {
   }
   if (t == "hs_verify") return verify(r, a.value("all", false));
   if (t == "hs_commit") {
-    auto c = commit(r, need_str(a, "message"));
+    std::vector<long long> resolves;
+    for (auto& id : a.value("resolves", json::array())) resolves.push_back(id.get<long long>());
+    auto wc = commit_work(r, need_str(a, "message"), resolves);
+    auto& c = wc.result;
     json j = {{"commit", short_hash(c.commit)}, {"changes", diff_to_json(r.store(), c.diff, true, 300)}};
+    if (!wc.resolved.empty()) {
+      json res = json::array();
+      for (auto& q : wc.resolved) res.push_back(describe_request(q));
+      j["resolved"] = res;
+      j["requests"] = wc.landed ? "done: the requesters are told" : "done when you push: the requesters are told then";
+    }
+    if (!wc.warning.empty()) j["warning"] = wc.warning;
+    if (!wc.left_open.empty()) {
+      json open = json::array();
+      for (auto& q : wc.left_open) open.push_back(describe_request(q));
+      j["still_open"] = open;
+    }
     if (verification_status(r, r.work_ns_hash()) != "passed") j["note"] = "not verified: run hs_verify before pushing";
     j["review"] = "check the diff above is what you intended; hs_review records your review";
     return j;
@@ -397,8 +539,10 @@ json McpServer::handle(const json& msg) {
       repo_.set_agent(client + "-" + new_uuid().substr(0, 6));
     }
     std::string ver = msg.value("/params/protocolVersion"_json_pointer, std::string("2025-06-18"));
+    json caps = {{"tools", json::object()}};
+    if (channel_) caps["experimental"] = {{"claude/channel", json::object()}};
     return reply({{"protocolVersion", ver},
-                  {"capabilities", {{"tools", json::object()}}},
+                  {"capabilities", caps},
                   {"serverInfo", {{"name", "hashstash"}, {"version", HS_VERSION}}},
                   {"instructions", kInstructions}});
   }
@@ -419,20 +563,66 @@ json McpServer::handle(const json& msg) {
 }
 
 void McpServer::serve(std::istream& in, std::ostream& out) {
+  std::mutex out_mu;
+  auto write = [&](const json& j) {
+    std::lock_guard<std::mutex> g(out_mu);
+    out << j.dump() << "\n";
+    out.flush();
+  };
+  // Channel: a watcher with its own connection (the hub, or its own handle on
+  // this store) waits for the agent's events and pushes each one.
+  auto stop = std::make_shared<std::atomic<bool>>(false);
+  bool watching = false;
+  auto start_watch = [&] {
+    if (!channel_ || watching) return;
+    watching = true;
+    std::string agent = repo_.agent();
+    std::shared_ptr<Coordination> c;
+    std::shared_ptr<Store> own_store;
+    if (coordinated_by_hub(repo_)) {
+      c = coordination(repo_);
+    } else {
+      own_store = std::make_shared<Store>(to_generic(repo_.hs_dir() / "store.db"));
+      c = sql_coordination(*own_store);
+    }
+    long long after = c->last_event();
+    std::thread([c, own_store, agent, after, stop, write]() mutable {
+      while (!*stop) {
+        std::vector<Event> events;
+        try {
+          events = c->events_wait(agent, after, 50, 25);
+        } catch (...) {
+          std::this_thread::sleep_for(std::chrono::seconds(5));
+          continue;
+        }
+        for (auto& e : events) {
+          if (*stop) return;
+          after = e.seq;
+          Request q = Request::from_json(e.data.value("request", json::object()));
+          write({{"jsonrpc", "2.0"},
+                 {"method", "notifications/claude/channel"},
+                 {"params", {{"content", "hashstash: " + describe_event(e)},
+                             {"meta", {{"kind", e.kind}, {"request", std::to_string(q.id)}, {"seq", std::to_string(e.seq)}}}}}});
+        }
+      }
+    }).detach();
+  };
   std::string line;
   while (std::getline(in, line)) {
     if (trim(line).empty()) continue;
     json resp;
+    bool init = false;
     try {
-      resp = handle(json::parse(line));
+      json msg = json::parse(line);
+      init = msg.value("method", "") == "initialize";
+      resp = handle(msg);
     } catch (std::exception& e) {
       resp = {{"jsonrpc", "2.0"}, {"id", nullptr}, {"error", {{"code", -32700}, {"message", e.what()}}}};
     }
-    if (!resp.is_null()) {
-      out << resp.dump() << "\n";
-      out.flush();
-    }
+    if (!resp.is_null()) write(resp);
+    if (init) start_watch();  // the agent's name is known from here on
   }
+  *stop = true;
 }
 
 }  // namespace hs

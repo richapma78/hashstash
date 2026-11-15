@@ -11,6 +11,7 @@ cd "$WORK" || exit 1
 rm -rf alice bob gitmirror.git checkout publish-wc
 echo "=== hub is up"
 curl -s "$URL/" ; echo
+curl -s -X POST "$URL/api/p/$PROJECT/create" -d '{}'; echo
 
 echo "=== alice imports the project and pushes"
 mkdir alice && cd alice

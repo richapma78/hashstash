@@ -208,6 +208,57 @@ CREATE TABLE IF NOT EXISTS push_log (
   agent TEXT NOT NULL,
   time INTEGER NOT NULL
 );
+
+-- Coordination between agents (see ops/coord.h). On a client with a hub these
+-- stay empty: the hub is the authority and holds them.
+CREATE TABLE IF NOT EXISTS work_item (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,            -- feature | bug | chore
+  title TEXT NOT NULL,
+  owner TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  link TEXT NOT NULL,
+  status TEXT NOT NULL,          -- open | done | abandoned
+  created INTEGER NOT NULL,
+  closed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS request (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,            -- change (holder makes it) | lock (queued for the lock)
+  target TEXT NOT NULL,          -- lineage id
+  name TEXT NOT NULL,
+  requester TEXT NOT NULL,
+  requester_work TEXT NOT NULL,
+  holder TEXT NOT NULL,
+  holder_work TEXT NOT NULL,
+  text TEXT NOT NULL,
+  test_file TEXT NOT NULL,
+  test_code TEXT NOT NULL,
+  status TEXT NOT NULL,          -- open accepted resolved done declined cancelled granted returned
+  commit_hash TEXT NOT NULL,
+  note TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  created INTEGER NOT NULL,
+  updated INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS request_target ON request(target, status);
+CREATE TABLE IF NOT EXISTS event (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent TEXT NOT NULL,           -- recipient
+  work TEXT NOT NULL,            -- recipient's work item (its owner also sees it)
+  kind TEXT NOT NULL,
+  data TEXT NOT NULL,
+  time INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS event_agent ON event(agent, seq);
+CREATE TABLE IF NOT EXISTS subscription (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent TEXT NOT NULL,
+  url TEXT NOT NULL,
+  after INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL,
+  UNIQUE(agent, url)
+);
 )SQL";
 
 Store::Store(const std::string& db_path) {
@@ -222,6 +273,10 @@ Store::Store(const std::string& db_path) {
   // Migrations for stores created by earlier versions.
   try {
     exec("ALTER TABLE lock ADD COLUMN origin TEXT NOT NULL DEFAULT ''");  // '' = local, else remote name
+  } catch (...) {
+  }
+  try {
+    exec("ALTER TABLE lock ADD COLUMN work TEXT NOT NULL DEFAULT ''");  // work item the lock is for
   } catch (...) {
   }
   exec("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')");

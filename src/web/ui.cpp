@@ -561,6 +561,7 @@ void mount_ui(httplib::Server& srv, const UiSite& site_in) {
       Review rv = add_review(r, req.matches[2], req.get_param_value("verdict"), req.get_param_value("summary"), "human",
                              json::array(), reviewer);
       std::string note = site->where == "local" ? share_reviews(r) : "";
+      if (site->changed) site->changed(req.matches[1]);
       res.set_header("Set-Cookie", "hs_reviewer=" + url_enc(reviewer) + "; Path=/; Max-Age=31536000; SameSite=Lax");
       res.set_redirect("/ui/p/" + url_enc(req.matches[1]) + "/commit/" + rv.commit + "?saved=" + (note.empty() ? "1" : url_enc(note)), 303);
       return std::string();

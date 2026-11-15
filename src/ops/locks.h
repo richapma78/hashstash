@@ -1,7 +1,14 @@
 #pragma once
 // Hard, leased locks on definitions (by lineage id) or fragments (by crumb id).
 // A lock blocks every other agent from changing the target until it is
-// released or expires; any action by the holder renews all its locks.
+// released or expires; any action by the holder renews all its locks. Every
+// lock is taken for a work item (the agent's current one; an ad-hoc one is
+// made if it has none), so others can see what the lock is for.
+//
+// Where locks live: this store, mirrored to the hub when the project has one
+// (the hub must agree first); or, when the repo has a coordination override
+// (the hub's own workspace), only there. Releasing a lock hands it to the
+// first request queued on it (see ops/coord.h).
 #include <optional>
 #include <string>
 #include <vector>
@@ -14,6 +21,7 @@ struct LockInfo {
   std::string target;  // lineage id or fragment id
   std::string name;    // qualified name when taken
   std::string holder;
+  std::string work;    // the work item it was taken for
   long long acquired = 0;
   long long expires = 0;
 };

@@ -12,6 +12,7 @@
 
 #include "hub/backend.h"
 #include "hub/service.h"
+#include "hub/workspace.h"
 #include "mcp/server.h"
 #include "ops/publish.h"
 #include "ops/repo.h"
@@ -23,7 +24,7 @@ using json = nlohmann::json;
 static const char* kUsage = R"(hshub - hashstash hub server
 
   hshub serve   [--root dir] [--host 127.0.0.1] [--port 7420] [--verify-on-push] [--token secret]
-                [--review-token secret]
+                [--review-token secret] [--cache dir] [--force-cache]
   hshub create  <project> [--root dir]
   hshub list    [--root dir]
   hshub publish <project> [--branch main] [--root dir]
@@ -37,6 +38,11 @@ review pages ask for it once per browser.
 With --review-token (or HS_HUB_REVIEW_TOKEN), recording a person's review on the pages
 needs that token too, so only people you give it to can mark commits as human reviewed.
 Publishing is set per project in <root>/<project>/.hs/config.toml under [publish].
+--cache sets where workspaces for non-SQLite backends are kept; --force-cache uses such a
+cached workspace even with SQLite, to run exactly the way a scaled hub runs.
+Agents get their events (requests, granted locks, finished requests) from
+POST /api/p/<project>/coord {"method":"events","agent":..,"after":..,"wait":seconds},
+which waits up to 60 s for one, or as webhooks (hs subscribe <url>).
 )";
 
 namespace {
@@ -45,7 +51,7 @@ std::map<std::string, std::string> opts(int argc, char** argv, std::vector<std::
   std::map<std::string, std::string> o;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
-    if (a == "--verify-on-push") o[a] = "1";
+    if (a == "--verify-on-push" || a == "--force-cache") o[a] = "1";
     else if (starts_with(a, "--") && i + 1 < argc) o[a] = argv[++i];
     else pos.push_back(a);
   }
@@ -65,11 +71,12 @@ int serve(const std::map<std::string, std::string>& o) {
   auto backend = make_sqlite_backend(root);
   HubOptions hopt;
   hopt.verify_on_push = o.count("--verify-on-push") > 0;
+  hopt.cache_dir = get(o, "--cache", "");
+  hopt.force_cache = o.count("--force-cache") > 0;
   HubService service(*backend, hopt);
-  std::mutex mu;  // SQLite: one writer at a time; a database backend would drop this
-
-  // MCP sessions: one server (one agent identity) per session id.
-  std::map<std::string, std::unique_ptr<McpServer>> sessions;
+  // Serialises requests in this process (SQLite: one writer at a time). All
+  // state is in the backend, so more hub servers can run side by side.
+  std::mutex mu;
 
   httplib::Server srv;
   srv.set_payload_max_length(512ull * 1024 * 1024);
@@ -108,9 +115,11 @@ int serve(const std::map<std::string, std::string>& o) {
   site.where = "hub";
   site.projects = [&] { return backend->projects(); };
   site.open = [&](const std::string& name) -> Repo* {
-    auto p = backend->project(name, false);
-    auto* local = p ? dynamic_cast<LocalRepoAccess*>(p.get()) : nullptr;
-    return local ? local->local_repo() : nullptr;
+    Workspace* ws = service.workspace(name);
+    return ws ? &ws->repo() : nullptr;
+  };
+  site.changed = [&](const std::string& name) {
+    if (Workspace* ws = service.workspace(name)) ws->save("review pages");
   };
   site.mu = &mu;
   site.review_token = review_token;
@@ -122,10 +131,22 @@ int serve(const std::map<std::string, std::string>& o) {
   });
   srv.Post(R"(/api/p/([A-Za-z0-9._-]+)/([a-z_]+))", [&](const httplib::Request& req, httplib::Response& res) {
     if (!authorized(req, res)) return;
-    std::lock_guard<std::mutex> g(mu);
     try {
       json body = req.body.empty() ? json::object() : json::parse(req.body);
-      json out = service.handle(req.matches[1], req.matches[2], body);
+      std::string project = req.matches[1], op = req.matches[2];
+      // Long poll for events: ask, and if there is nothing yet, ask again
+      // every half second (without holding the lock) until wait runs out.
+      int wait = op == "coord" && body.value("method", "") == "events" ? std::min(body.value("wait", 0), 60) : 0;
+      auto until = std::chrono::steady_clock::now() + std::chrono::seconds(wait);
+      json out;
+      for (;;) {
+        {
+          std::lock_guard<std::mutex> g(mu);
+          out = service.handle(project, op, body);
+        }
+        if (!wait || !out["events"].empty() || std::chrono::steady_clock::now() >= until) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      }
       res.set_content(out.dump(), "application/json");
     } catch (std::exception& e) {
       res.status = 400;
@@ -139,16 +160,30 @@ int serve(const std::map<std::string, std::string>& o) {
     std::lock_guard<std::mutex> g(mu);
     try {
       std::string project = req.matches[1];
-      auto p = backend->project(project, false);
-      auto* local = p ? dynamic_cast<LocalRepoAccess*>(p.get()) : nullptr;
-      if (!local || !local->local_repo()) throw std::runtime_error("no project '" + project + "'");
+      Workspace* ws = service.workspace(project);
+      if (!ws) throw std::runtime_error("no project '" + project + "'");
+      Repo& repo = ws->repo();
       json msg = json::parse(req.body);
+      // Sessions live in the backend (who the agent is), so any hub server
+      // can answer any request of a session.
       std::string sid = req.get_header_value("Mcp-Session-Id");
-      if (msg.value("method", "") == "initialize" || sid.empty() || !sessions.count(project + "/" + sid)) {
+      json session = sid.empty() ? json(nullptr) : backend->load_session(project + "/" + sid);
+      if (msg.value("method", "") == "initialize" || session.is_null()) {
         sid = new_uuid();
-        sessions[project + "/" + sid] = std::make_unique<McpServer>(*local->local_repo());
+        session = {{"agent", ""}};
       }
-      json out = sessions[project + "/" + sid]->handle(msg);
+      repo.set_agent(session.value("agent", "").empty() ? "hub" : session.value("agent", ""));
+      json out;
+      try {
+        out = McpServer(repo).handle(msg);
+        session["agent"] = repo.agent();
+        backend->save_session(project + "/" + sid, session, now_seconds() + 7 * 24 * 3600);
+        ws->save(repo.agent());
+      } catch (...) {
+        repo.set_agent("hub");
+        throw;
+      }
+      repo.set_agent("hub");
       res.set_header("Mcp-Session-Id", sid);
       if (out.is_null()) {
         res.status = 202;
@@ -170,6 +205,7 @@ int serve(const std::map<std::string, std::string>& o) {
         std::lock_guard<std::mutex> g(mu);
         int n = service.run_jobs();
         if (n) std::cout << "ran " << n << " background job(s)" << std::endl;
+        service.deliver_webhooks();
       }
       std::this_thread::sleep_for(std::chrono::seconds(2));
     }
@@ -212,10 +248,13 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (pos[0] == "publish") {
-      auto p = backend->project(pos[1], false);
-      auto* local = p ? dynamic_cast<LocalRepoAccess*>(p.get()) : nullptr;
-      if (!local) throw std::runtime_error("no project " + pos[1]);
-      std::cout << publish(*local->local_repo(), get(o, "--branch", "")).dump(2) << "\n";
+      HubOptions hopt;
+      hopt.cache_dir = get(o, "--cache", "");
+      hopt.force_cache = o.count("--force-cache") > 0;
+      HubService service(*backend, hopt);
+      Workspace* ws = service.workspace(pos[1]);
+      if (!ws) throw std::runtime_error("no project " + pos[1]);
+      std::cout << publish(ws->repo(), get(o, "--branch", "")).dump(2) << "\n";
       return 0;
     }
     std::cerr << kUsage;

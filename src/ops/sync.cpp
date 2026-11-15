@@ -102,13 +102,19 @@ void sync_locks_down(Repo& repo, const std::string& remote, const json& locks) {
     Stmt del(s.db(), "DELETE FROM lock WHERE origin = ?");
     del.bind(1, remote).run();
     Stmt ins(s.db(),
-             "INSERT OR REPLACE INTO lock(target, name, holder, acquired, expires, origin) VALUES (?, ?, ?, ?, ?, ?)");
+             "INSERT OR REPLACE INTO lock(target, name, holder, acquired, expires, origin, work) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    // Ours that we don't have yet: handed to us by the hub (a queued request).
+    Stmt own(s.db(),
+             "INSERT OR IGNORE INTO lock(target, name, holder, acquired, expires, origin, work) VALUES (?, ?, ?, ?, ?, '', ?)");
     for (auto& l : locks) {
-      if (l.at("holder") == repo.agent()) continue;  // ours: already local
-      ins.bind(1, l.at("target").get<std::string>()).bind(2, l.at("name").get<std::string>())
+      Stmt& st = l.at("holder") == repo.agent() ? own : ins;
+      st.bind(1, l.at("target").get<std::string>()).bind(2, l.at("name").get<std::string>())
           .bind(3, l.at("holder").get<std::string>()).bind(4, now_seconds())
-          .bind(5, l.at("expires").get<long long>()).bind(6, remote).run();
-      ins.reset();
+          .bind(5, l.at("expires").get<long long>());
+      if (&st == &ins) ins.bind(6, remote).bind(7, l.value("work", ""));
+      else own.bind(6, l.value("work", ""));
+      st.run();
+      st.reset();
     }
   });
 }
@@ -124,10 +130,14 @@ void remote_lock_hook(Repo& repo, const LockInfo& l, bool acquire, bool force) {
     t = owned.get();
   }
   if (acquire) {
-    json r = t->call("lock", {{"target", l.target}, {"name", l.name}, {"agent", l.holder},
+    json r = t->call("lock", {{"target", l.target}, {"name", l.name}, {"agent", l.holder}, {"work", l.work},
                               {"minutes", repo.config().lock_minutes}});
-    if (!r.value("ok", false))
-      throw std::runtime_error(l.name + " is locked on the hub by " + r["held_by"]["holder"].get<std::string>());
+    if (!r.value("ok", false)) {
+      std::string work = r["held_by"].value("work", "");
+      throw std::runtime_error(l.name + " is locked on the hub by " + r["held_by"]["holder"].get<std::string>() +
+                               (work.empty() ? "" : " for " + work) + ". Log what you need instead of waiting: hs request " +
+                               l.name + " --need \"...\", or --lock to take it next");
+    }
   } else {
     t->call("unlock", {{"target", l.target}, {"agent", l.holder}, {"force", force}});
   }
@@ -185,6 +195,7 @@ std::string share_reviews(Repo& repo) {
 }
 
 void set_lock_transport_override(HubTransport* t) { g_lock_override = t; }
+HubTransport* lock_transport_override() { return g_lock_override; }
 
 void set_remote(Repo& repo, const std::string& name, const std::string& url) {
   repo.store().set_ref("remote/" + name, url);
@@ -264,7 +275,8 @@ json push(Repo& repo, HubTransport& hub, const std::string& remote, const std::s
 
   json locks = json::array();
   for (auto& l : list_locks(repo))
-    if (l.holder == repo.agent()) locks.push_back({{"target", l.target}, {"name", l.name}, {"expires", l.expires}});
+    if (l.holder == repo.agent())
+      locks.push_back({{"target", l.target}, {"name", l.name}, {"work", l.work}, {"expires", l.expires}});
   json verification = {{"status", status}};
   try {
     verification["report"] = json::parse(report);

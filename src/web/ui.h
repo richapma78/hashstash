@@ -31,6 +31,9 @@ struct UiSite {
   std::function<Repo*(const std::string&)> open;  // nullptr if there is no such project
   std::mutex* mu = nullptr;                      // held while a page reads the store
   std::string review_token;                      // hub: needed to record a human review ("" = none)
+  // Called after a page changed the project (a review), so a hub can write
+  // its workspace back to the backend. Optional.
+  std::function<void(const std::string&)> changed;
 };
 
 void mount_ui(httplib::Server& srv, const UiSite& site);

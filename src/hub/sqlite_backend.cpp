@@ -14,11 +14,12 @@ namespace hs {
 
 namespace {
 
-class SqliteProject : public ProjectStore, public LocalRepoAccess {
+class SqliteProject : public ProjectStore {
  public:
-  SqliteProject(std::string name, std::unique_ptr<Repo> repo) : name_(std::move(name)), repo_(std::move(repo)) {}
+  SqliteProject(std::string name, std::unique_ptr<Repo> repo)
+      : name_(std::move(name)), repo_(std::move(repo)), coord_(sql_coordination(repo_->store(), repo_->config().lock_minutes)) {}
   std::string name() const override { return name_; }
-  Repo* local_repo() override { return repo_.get(); }
+  Repo* native_repo() override { return repo_.get(); }
 
   bool has(const Hash& h) override { return store().has(h); }
   std::optional<Object> get(const Hash& h) override { return store().get(h); }
@@ -34,47 +35,23 @@ class SqliteProject : public ProjectStore, public LocalRepoAccess {
     return out;
   }
   bool cas_branch(const std::string& branch, const Hash& old_head, const Hash& new_head) override {
+    return cas_ref("branch/" + branch, old_head, new_head);
+  }
+  std::string ref(const std::string& name) override { return store().ref(name).value_or(""); }
+  bool cas_ref(const std::string& name, const std::string& old_value, const std::string& new_value) override {
     bool ok = false;
     store().transaction([&] {
-      std::string cur = store().ref("branch/" + branch).value_or("");
-      if (cur != old_head) return;
-      store().set_ref("branch/" + branch, new_head);
+      if (store().ref(name).value_or("") != old_value) return;
+      store().set_ref(name, new_value);
       ok = true;
     });
     return ok;
   }
 
-  std::vector<HubLock> locks() override {
-    Stmt st(store().db(), "SELECT target, name, holder, expires FROM lock WHERE expires > ? ORDER BY name");
-    st.bind(1, now_seconds());
-    std::vector<HubLock> out;
-    while (st.step()) out.push_back({st.text(0), st.text(1), st.text(2), st.integer(3)});
-    return out;
-  }
-  std::optional<HubLock> acquire(const HubLock& l) override {
-    std::optional<HubLock> blocked;
-    store().transaction([&] {
-      Stmt st(store().db(), "SELECT target, name, holder, expires FROM lock WHERE target = ? AND expires > ?");
-      st.bind(1, l.target).bind(2, now_seconds());
-      if (st.step() && st.text(2) != l.holder) {
-        blocked = HubLock{st.text(0), st.text(1), st.text(2), st.integer(3)};
-        return;
-      }
-      Stmt up(store().db(),
-              "INSERT INTO lock(target, name, holder, acquired, expires) VALUES (?, ?, ?, ?, ?) "
-              "ON CONFLICT(target) DO UPDATE SET name = excluded.name, holder = excluded.holder, "
-              "expires = excluded.expires");
-      up.bind(1, l.target).bind(2, l.name).bind(3, l.holder).bind(4, now_seconds()).bind(5, l.expires).run();
-    });
-    return blocked;
-  }
-  bool release(const std::string& target, const std::string& holder, bool force) override {
-    Stmt st(store().db(), force ? "DELETE FROM lock WHERE target = ?"
-                                : "DELETE FROM lock WHERE target = ? AND holder = ?");
-    st.bind(1, target);
-    if (!force) st.bind(2, holder);
-    st.run();
-    return sqlite3_changes(store().db()) > 0;
+  Coordination& coord() override { return *coord_; }
+  std::string config_text() override {
+    fs::path p = repo_->hs_dir() / "config.toml";
+    return fs::exists(p) ? read_file(p) : "";
   }
 
   void set_verification(const Hash& ns, const std::string& status, const std::string& report) override {
@@ -99,6 +76,19 @@ class SqliteProject : public ProjectStore, public LocalRepoAccess {
                 const std::string& agent) override {
     hs::log_push(store(), branch, old_head, new_head, agent);
   }
+  nlohmann::json pushes_after(long long id) override {
+    Stmt st(store().db(),
+            "SELECT id, branch, old_head, new_head, agent, time FROM push_log WHERE id > ? ORDER BY id LIMIT 500");
+    st.bind(1, id);
+    nlohmann::json out = nlohmann::json::array();
+    long long last = id;
+    while (st.step()) {
+      last = st.integer(0);
+      out.push_back({{"id", last}, {"branch", st.text(1)}, {"old", st.text(2)}, {"new", st.text(3)},
+                     {"agent", st.text(4)}, {"time", st.integer(5)}});
+    }
+    return {{"pushes", out}, {"last", last}};
+  }
 
   void begin() override { store().exec("BEGIN IMMEDIATE"); }
   void commit() override { store().exec("COMMIT"); }
@@ -108,6 +98,7 @@ class SqliteProject : public ProjectStore, public LocalRepoAccess {
   Store& store() { return repo_->store(); }
   std::string name_;
   std::unique_ptr<Repo> repo_;
+  std::unique_ptr<Coordination> coord_;
 };
 
 bool valid_name(const std::string& n) {
@@ -126,6 +117,8 @@ class SqliteBackend : public HubBackend {
         "CREATE TABLE IF NOT EXISTS job (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, "
         "kind TEXT NOT NULL, arg TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', "
         "created INTEGER NOT NULL, result TEXT NOT NULL DEFAULT '')");
+    jobs_->exec(
+        "CREATE TABLE IF NOT EXISTS mcp_session (id TEXT PRIMARY KEY, data TEXT NOT NULL, expires INTEGER NOT NULL)");
   }
 
   std::vector<std::string> projects() override {
@@ -176,6 +169,25 @@ class SqliteBackend : public HubBackend {
     std::lock_guard<std::mutex> g(mu_);
     Stmt st(jobs_->db(), "UPDATE job SET state = 'done', result = ? WHERE id = ?");
     st.bind(1, result).bind(2, id).run();
+  }
+
+  void save_session(const std::string& id, const nlohmann::json& data, long long expires) override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "INSERT OR REPLACE INTO mcp_session(id, data, expires) VALUES (?, ?, ?)");
+    st.bind(1, id).bind(2, data.dump()).bind(3, expires).run();
+    Stmt old(jobs_->db(), "DELETE FROM mcp_session WHERE expires < ?");
+    old.bind(1, now_seconds()).run();
+  }
+  nlohmann::json load_session(const std::string& id) override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "SELECT data FROM mcp_session WHERE id = ? AND expires >= ?");
+    st.bind(1, id).bind(2, now_seconds());
+    if (!st.step()) return nullptr;
+    try {
+      return nlohmann::json::parse(st.text(0));
+    } catch (...) {
+      return nullptr;
+    }
   }
 
  private:

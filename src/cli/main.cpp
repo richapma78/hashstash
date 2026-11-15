@@ -18,6 +18,7 @@
 #include "ops/review.h"
 #include "ops/tests.h"
 #include "ops/verify.h"
+#include "ops/work.h"
 
 #include "mcp/server.h"
 #include "web/ui.h"
@@ -57,7 +58,7 @@ Edit (code lives in the store; edits happen in scratch files)
 
 Review and history
   hs diff [name] [--from ref] [--to ref] [--stat]
-  hs commit -m "what changed and why" [--keep-locks]
+  hs commit -m "what changed and why" [--keep-locks] [--resolves ids]
   hs log [name] [-n N]
   hs history [-n N]                   lifecycle steps (import, update, commit, verify...)
   hs rollback @<id>                   restore a step's state (the latest stays in history)
@@ -82,8 +83,23 @@ Notes and context
   hs note rm <name> <id>
   hs why <name> <text> [--kind origin|design|change|note] [--source ref]
 
-Locks
+Locks and work items (many agents on one codebase)
+  hs work start <id> --title "..." [--kind feature|bug|chore] [--priority N] [--link url]
+                                      what you are working on: locks and requests carry it
+  hs work [status] | list [--all] | done [id] | abandon [id]
   hs lock <name>... | hs unlock <name>... [--force] | hs locks
+  hs request <name> --need "..." [--test-file f --test-code file|-]
+                                      someone holds it: ask them to make your change before they
+                                      commit it (your tests get linked to it), instead of waiting
+  hs request <name> --lock            queue for the lock instead (yours when released)
+  hs request accept|decline|cancel <id> [--reason "..."]
+  hs requests [--all] [--closed]
+  hs commit ... --resolves 3,4        commit that makes requested changes (required while
+                                      requests are open on what you commit; [work] requests)
+  hs inbox [--wait S] [--peek] [--follow]
+                                      your events: new requests, answers, locks handed to you,
+                                      requests done (exit 3 when there is nothing)
+  hs subscribe <url> | unsubscribe <url>   have the hub post your events to a webhook
 
 Call graph
   hs graph callers|callees|reach|impact <name> [--depth N]
@@ -99,7 +115,8 @@ Hub (hshub)
   With remote "origin" set, locks are taken on the hub too (HS_OFFLINE=1 to skip).
 
 Agents
-  hs mcp                              MCP server over stdio for this project
+  hs mcp [--channel]                  MCP server over stdio for this project; --channel also
+                                      pushes your events into the session (Claude Code channels)
 
 Global options: --as <agent>   act as this agent (or set HS_AGENT)
                 --json         machine-readable output
@@ -117,7 +134,9 @@ struct Args {
 };
 
 const std::vector<std::string> kValueOpts = {"--as", "--prefix", "--out", "--at", "--from", "--to",
-                                             "-m", "-n", "--after", "--depth", "--kind", "--source", "--port"};
+                                             "-m", "-n", "--after", "--depth", "--kind", "--source", "--port",
+                                             "--title", "--priority", "--link", "--need", "--test-file",
+                                             "--test-code", "--reason", "--resolves", "--wait"};
 
 Args parse(int argc, char** argv) {
   Args a;
@@ -424,10 +443,34 @@ int cmd_diff(Repo& repo, const Args& a) {
   return 0;
 }
 
+long long request_id(const std::string& s);
+
 int cmd_commit(Repo& repo, const Args& a) {
-  auto r = commit(repo, a.get("-m"), a.has("--keep-locks"));
-  if (g_json) return out_json({{"commit", r.commit}, {"changes", diff_to_json(repo.store(), r.diff, false)}}), 0;
+  std::vector<long long> resolves;
+  {
+    std::string list = a.get("--resolves") + ",", id;
+    for (char c : list)
+      if (c != ',') {
+        id += c;
+      } else {
+        if (!trim(id).empty()) resolves.push_back(request_id(trim(id)));
+        id.clear();
+      }
+  }
+  auto wc = commit_work(repo, a.get("-m"), resolves, a.has("--keep-locks"));
+  auto& r = wc.result;
+  if (g_json) {
+    json res = json::array(), open = json::array();
+    for (auto& q : wc.resolved) res.push_back(q.to_json());
+    for (auto& q : wc.left_open) open.push_back(q.to_json());
+    return out_json({{"commit", r.commit}, {"changes", diff_to_json(repo.store(), r.diff, false)},
+                     {"resolved", res}, {"left_open", open}, {"requests_done", wc.landed}}), 0;
+  }
   std::cout << "Committed #" << short_hash(r.commit) << " on " << repo.branch() << "\n";
+  for (auto& q : wc.resolved)
+    std::cout << "Resolves R-" << q.id << " for " << q.requester << (wc.landed ? " (done)" : " (done when pushed)") << "\n";
+  for (auto& q : wc.left_open) std::cout << "Still open: " << describe_request(q) << "\n";
+  if (!wc.warning.empty()) std::cout << "Note: " << wc.warning << "\n";
   auto lines = split_lines(diff_to_text(repo.store(), r.diff, false));
   for (size_t i = 0; i < lines.size() && i < 25; ++i) std::cout << lines[i];
   if (lines.size() > 25) std::cout << "  ... and " << lines.size() - 25 << " more (hs log --json for all)\n";
@@ -616,11 +659,162 @@ int cmd_locks(Repo& repo, const Args&) {
   auto locks = list_locks(repo);
   if (g_json) {
     json j = json::array();
-    for (auto& l : locks) j.push_back({{"name", l.name}, {"holder", l.holder}, {"until", format_time(l.expires)}});
+    for (auto& l : locks)
+      j.push_back({{"name", l.name}, {"holder", l.holder}, {"work", l.work}, {"until", format_time(l.expires)}});
     return out_json(j), 0;
   }
-  for (auto& l : locks) std::cout << l.name << "  " << l.holder << "  until " << format_time(l.expires) << "\n";
+  for (auto& l : locks)
+    std::cout << l.name << "  " << l.holder << (l.work.empty() ? "" : " for " + l.work) << "  until "
+              << format_time(l.expires) << "\n";
   if (locks.empty()) std::cout << "No locks.\n";
+  return 0;
+}
+
+
+// ---- work items, requests, inbox ------------------------------------------------
+
+long long request_id(const std::string& s) {
+  std::string t = s;
+  if (t.size() > 2 && (t[0] == 'R' || t[0] == 'r') && t[1] == '-') t = t.substr(2);
+  try {
+    return std::stoll(t);
+  } catch (...) {
+    throw std::runtime_error("not a request id: " + s + " (e.g. R-3 or 3)");
+  }
+}
+
+void print_work(const WorkItem& w) {
+  std::cout << w.id << "  [" << w.kind << ", " << w.status << ", priority " << w.priority << "]  " << w.title
+            << "  (owner " << w.owner << ")" << (w.link.empty() ? "" : "  " + w.link) << "\n";
+}
+
+int cmd_work(Repo& repo, const Args& a) {
+  std::string sub = a.pos.size() > 1 ? a.pos[1] : "";
+  if (sub.empty() || sub == "status") {
+    json st = work_status(repo);
+    if (g_json) return out_json(st), 0;
+    if (st["work"].is_null()) std::cout << "No current work item (hs work start <id> --title \"...\").\n";
+    else print_work(WorkItem::from_json(st["work"]));
+    for (auto& l : st["locks"]) std::cout << "  lock  " << l["name"].get<std::string>() << " until " << l["until"].get<std::string>() << "\n";
+    for (auto& r : st["requests_for_you"]) std::cout << "  for you   " << r["summary"].get<std::string>() << "\n";
+    for (auto& r : st["your_requests"]) std::cout << "  yours     " << r["summary"].get<std::string>() << "\n";
+    if (st["inbox"].get<size_t>()) std::cout << "  " << st["inbox"].get<size_t>() << " new event(s): hs inbox\n";
+    return 0;
+  }
+  if (sub == "start") {
+    need(a, 3, "work start <id> [--title \"...\"] [--kind feature|bug|chore] [--priority N] [--link url]");
+    WorkItem w;
+    w.id = a.pos[2];
+    w.kind = a.get("--kind");
+    w.title = a.get("--title");
+    w.link = a.get("--link");
+    if (a.has("--priority")) w.priority = std::stoi(a.get("--priority"));
+    WorkItem out = start_work(repo, w);
+    if (g_json) return out_json(out.to_json()), 0;
+    std::cout << "Working on ";
+    print_work(out);
+    return 0;
+  }
+  if (sub == "list") {
+    auto ws = coordination(repo)->works(a.has("--all"));
+    if (g_json) {
+      json j = json::array();
+      for (auto& w : ws) j.push_back(w.to_json());
+      return out_json(j), 0;
+    }
+    for (auto& w : ws) print_work(w);
+    if (ws.empty()) std::cout << "No open work items.\n";
+    return 0;
+  }
+  if (sub == "done" || sub == "abandon") {
+    WorkItem w = finish_work(repo, a.pos.size() > 2 ? a.pos[2] : "", sub == "done" ? "done" : "abandoned");
+    if (g_json) return out_json(w.to_json()), 0;
+    print_work(w);
+    return 0;
+  }
+  throw std::runtime_error("usage: hs work [status] | start <id> ... | list [--all] | done [id] | abandon [id]");
+}
+
+int cmd_request(Repo& repo, const Args& a) {
+  need(a, 2, "request <name> --need \"...\" [--test-file f --test-code file] | request accept|decline|cancel <id>");
+  std::string sub = a.pos[1];
+  if ((sub == "accept" || sub == "decline" || sub == "cancel") && a.pos.size() > 2) {
+    long long id = request_id(a.pos[2]);
+    Request r = sub == "accept" ? accept_request(repo, id)
+                : sub == "decline" ? decline_request(repo, id, a.get("--reason", a.get("-m")))
+                                   : cancel_request(repo, id);
+    if (g_json) return out_json(r.to_json()), 0;
+    std::cout << describe_request(r) << "\n";
+    if (sub == "accept")
+      std::cout << "Make the change, verify, then: hs commit -m \"...\" --resolves " << r.id << "\n";
+    return 0;
+  }
+  std::string code;
+  if (a.has("--test-code")) code = a.get("--test-code") == "-" ? std::string(std::istreambuf_iterator<char>(std::cin), {})
+                                                                 : read_file(from_utf8(a.get("--test-code")));
+  Request r = make_request(repo, sub, a.has("--lock") ? "lock" : "change", a.get("--need", a.get("-m")),
+                           a.get("--test-file"), code);
+  if (g_json) return out_json(r.to_json()), 0;
+  std::cout << describe_request(r) << "\n";
+  std::cout << (r.kind == "lock" ? "You get the lock when " + r.holder + " releases it."
+                                 : r.holder + " is told and must deal with it before committing " + r.name + ".")
+            << " Watch for the answer: hs inbox --wait 300\n";
+  return 0;
+}
+
+int cmd_requests(Repo& repo, const Args& a) {
+  RequestFilter f;
+  if (!a.has("--all")) f.agent = repo.agent();
+  f.open_only = !a.has("--closed");
+  auto rs = coordination(repo)->requests(f);
+  if (g_json) {
+    json j = json::array();
+    for (auto& r : rs) j.push_back(r.to_json());
+    return out_json(j), 0;
+  }
+  for (auto& r : rs) std::cout << describe_request(r) << "\n";
+  if (rs.empty()) std::cout << "No requests.\n";
+  return 0;
+}
+
+// Exit code 0 when there were events, 3 when there were none (for scripts
+// and background waits that should wake an agent only when something came).
+int cmd_inbox(Repo& repo, const Args& a) {
+  int wait = std::stoi(a.get("--wait", "0"));
+  bool follow = a.has("--follow");
+  for (;;) {
+    auto events = inbox(repo, !a.has("--peek"), follow ? 25 : wait);
+    if (g_json) {
+      json j = json::array();
+      for (auto& e : events) {
+        json x = e.to_json();
+        x["text"] = describe_event(e);
+        j.push_back(x);
+      }
+      std::cout << j.dump(follow ? -1 : 2) << "\n";
+    } else {
+      for (auto& e : events) std::cout << format_time(e.time) << "  " << describe_event(e) << "\n";
+    }
+    std::cout.flush();
+    if (!follow) {
+      if (events.empty() && !g_json) std::cout << "Nothing new.\n";
+      return events.empty() ? 3 : 0;
+    }
+  }
+}
+
+int cmd_subscribe(Repo& repo, const Args& a, bool on) {
+  auto c = coordination(repo);
+  if (a.pos.size() < 2) {
+    for (auto& s : c->subscriptions()) std::cout << s.agent << "  " << s.url << "  (after event " << s.after << ")\n";
+    return 0;
+  }
+  if (on) {
+    auto s = c->subscribe(repo.agent(), a.pos[1]);
+    std::cout << "Events for " << s.agent << " will be posted to " << s.url << "\n";
+  } else {
+    std::cout << (c->unsubscribe(repo.agent(), a.pos[1]) ? "Unsubscribed.\n" : "No such subscription.\n");
+  }
   return 0;
 }
 
@@ -915,6 +1109,12 @@ int main(int argc, char** argv) {
     if (cmd == "tests") return cmd_tests(*repo, a);
     if (cmd == "note") return cmd_note(*repo, a);
     if (cmd == "why") return cmd_why(*repo, a);
+    if (cmd == "work") return cmd_work(*repo, a);
+    if (cmd == "request") return cmd_request(*repo, a);
+    if (cmd == "requests") return cmd_requests(*repo, a);
+    if (cmd == "inbox") return cmd_inbox(*repo, a);
+    if (cmd == "subscribe" || cmd == "subscriptions") return cmd_subscribe(*repo, a, true);
+    if (cmd == "unsubscribe") return cmd_subscribe(*repo, a, false);
     if (cmd == "lock") return cmd_lock(*repo, a, true);
     if (cmd == "unlock") return cmd_lock(*repo, a, false);
     if (cmd == "locks") return cmd_locks(*repo, a);
@@ -933,7 +1133,9 @@ int main(int argc, char** argv) {
       _setmode(_fileno(stdin), _O_BINARY);
 #endif
       std::ios::sync_with_stdio(false);
-      McpServer(*repo).serve(std::cin, std::cout);
+      McpServer server(*repo);
+      server.enable_channel(a.has("--channel"));
+      server.serve(std::cin, std::cout);
       return 0;
     }
     std::cerr << "hs: unknown command '" << cmd << "' (see: hs help)\n";

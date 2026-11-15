@@ -8,11 +8,17 @@
 //                 (local SQLite today; S3/Azure Blob sharded by hash prefix later)
 //   refs          branch heads, updated only by compare-and-swap: needs a
 //                 strongly consistent database (SQLite today; Postgres later)
-//   locks         leases with expiry (same database, or Redis)
+//   coordination  locks (leases with expiry), work items, requests and the
+//                 event feed (same database; see ops/coord.h)
 //   verification  results keyed by namespace hash
 //   jobs          queued background work (render, publish), so pushes return
 //                 fast and many stateless hub servers can share the load
 //   reviews       append-only records keyed by id, plus the push log
+//   sessions      MCP session state, so any hub server can serve any session
+//
+// The full ops library (verify, render, publish, MCP tools, review pages) runs
+// on a Workspace (hub/workspace.h) built from these interfaces, so no feature
+// depends on which backend is used.
 #include <nlohmann/json.hpp>
 
 #include <map>
@@ -22,13 +28,11 @@
 #include <vector>
 
 #include "core/store.h"
+#include "ops/coord.h"
 
 namespace hs {
 
-struct HubLock {
-  std::string target, name, holder;
-  long long expires = 0;
-};
+class Repo;
 
 struct HubJob {
   long long id = 0;
@@ -50,11 +54,16 @@ class ProjectStore {
   // Sets branch to new_head only if it is currently old_head ("" = absent).
   virtual bool cas_branch(const std::string& branch, const Hash& old_head, const Hash& new_head) = 0;
 
-  // Locks
-  virtual std::vector<HubLock> locks() = 0;  // unexpired
-  // Fails (returns the blocking lock) if someone else holds target.
-  virtual std::optional<HubLock> acquire(const HubLock& l) = 0;
-  virtual bool release(const std::string& target, const std::string& holder, bool force) = 0;
+  // Other refs (e.g. "work/<branch>": the hub workspace's uncommitted state),
+  // also changed only by compare-and-swap ("" = absent).
+  virtual std::string ref(const std::string& name) = 0;
+  virtual bool cas_ref(const std::string& name, const std::string& old_value, const std::string& new_value) = 0;
+
+  // Locks, work items, requests, events.
+  virtual Coordination& coord() = 0;
+
+  // The project's config.toml text (publish settings and so on).
+  virtual std::string config_text() = 0;
 
   // Verification
   virtual void set_verification(const Hash& ns, const std::string& status, const std::string& report) = 0;
@@ -66,6 +75,12 @@ class ProjectStore {
   virtual nlohmann::json reviews_after(long long seq) = 0;  // {reviews, last}
   virtual void log_push(const std::string& branch, const Hash& old_head, const Hash& new_head,
                         const std::string& agent) = 0;
+  virtual nlohmann::json pushes_after(long long id) = 0;  // {pushes: [{id, branch, old, new, agent, time}], last}
+
+  // Optional fast path: a backend whose storage already is a hashstash project
+  // returns it, and the hub's workspace uses it directly instead of a cache.
+  // Returning nullptr is always correct.
+  virtual Repo* native_repo() { return nullptr; }
 
   // Batch work: everything between begin/commit is atomic.
   virtual void begin() = 0;
@@ -83,6 +98,9 @@ class HubBackend {
   virtual void enqueue(const HubJob& j) = 0;
   virtual std::optional<HubJob> next_job() = 0;  // claims one
   virtual void finish_job(long long id, const std::string& result) = 0;
+  // MCP sessions (null if unknown or expired).
+  virtual void save_session(const std::string& id, const nlohmann::json& data, long long expires) = 0;
+  virtual nlohmann::json load_session(const std::string& id) = 0;
 };
 
 // SQLite backend: one hashstash project store per hosted project under root.

@@ -39,6 +39,7 @@ nlohmann::json pull(Repo& repo, HubTransport& hub, const std::string& remote = "
 // Test hook: route lock calls for remote "origin" through this transport
 // instead of opening an HTTP connection.
 void set_lock_transport_override(HubTransport* t);
+HubTransport* lock_transport_override();
 
 // Reviews: send the ones made here, fetch the ones made elsewhere. push and
 // pull do both; these are for sending a new review right away.

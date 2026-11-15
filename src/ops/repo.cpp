@@ -130,6 +130,7 @@ void Repo::load_config() {
     else if (key == "size.max_lines") num(config_.max_lines);
     else if (key == "locks.minutes") num(config_.lock_minutes);
     else if (key == "tests.require") config_.tests_require = unquote(val);
+    else if (key == "work.requests") config_.requests_on_commit = unquote(val);
     else if (key == "tests.python") config_.test_command_python = unquote(val);
     else if (key == "tests.impact_depth") num(config_.tests_impact_depth);
     else if (key == "history.keep") num(config_.history_keep);

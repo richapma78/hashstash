@@ -5,8 +5,11 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include <httplib.h>
+
 #include "core/model.h"
 #include "core/util.h"
+#include "hub/workspace.h"
 #include "ops/publish.h"
 #include "ops/repo.h"
 #include "ops/tests.h"
@@ -87,9 +90,7 @@ std::map<std::string, Hash> lineage_hashes(ProjectStore& p, const Hash& ns_hash)
   return out;
 }
 
-json lock_json(const HubLock& l) {
-  return {{"target", l.target}, {"name", l.name}, {"holder", l.holder}, {"expires", l.expires}};
-}
+json lock_json(const LockRec& l) { return l.to_json(); }
 
 std::string commit_ns(ProjectStore& p, const Hash& c) {
   if (c.empty()) return "";
@@ -97,6 +98,23 @@ std::string commit_ns(ProjectStore& p, const Hash& c) {
 }
 
 }  // namespace
+
+HubService::HubService(HubBackend& backend, HubOptions opt) : backend_(backend), opt_(std::move(opt)) {
+  if (opt_.cache_dir.empty()) opt_.cache_dir = to_generic(fs::temp_directory_path() / "hshub-cache");
+}
+HubService::~HubService() = default;
+
+Workspace* HubService::workspace(const std::string& project) {
+  auto it = workspaces_.find(project);
+  if (it == workspaces_.end()) {
+    auto p = backend_.project(project, false);
+    if (!p) return nullptr;
+    auto ws = std::make_unique<Workspace>(p, from_utf8(opt_.cache_dir), opt_.force_cache);
+    it = workspaces_.emplace(project, std::move(ws)).first;
+  }
+  it->second->refresh();
+  return it->second.get();
+}
 
 json HubService::push(ProjectStore& p, const json& req) {
   std::string branch = req.value("branch", "main");
@@ -122,9 +140,10 @@ json HubService::push(ProjectStore& p, const json& req) {
     if (!before.count(id) || before[id] != h) changed.insert(id);
   for (auto& [id, h] : before)
     if (!after.count(id)) changed.insert(id);
-  for (auto& l : p.locks())
+  for (auto& l : p.coord().locks())
     if (changed.count(l.target) && l.holder != agent)
-      throw std::runtime_error("push: " + l.name + " is locked on the hub by " + l.holder);
+      throw std::runtime_error("push: " + l.name + " is locked on the hub by " + l.holder +
+                               (l.work.empty() ? "" : " for " + l.work));
 
   // Verification gate.
   std::string status = req.value("/verification/status"_json_pointer, std::string());
@@ -132,9 +151,10 @@ json HubService::push(ProjectStore& p, const json& req) {
   std::string report = req.contains("verification") && req["verification"].contains("report")
                            ? req["verification"]["report"].dump()
                            : "{}";
-  auto* local = dynamic_cast<LocalRepoAccess*>(&p);
-  if (opt_.verify_on_push && local && local->local_repo()) {
-    Repo& r = *local->local_repo();
+  if (opt_.verify_on_push) {
+    Workspace* ws = workspace(p.name());
+    ws->fetch(new_head);
+    Repo& r = ws->repo();
     Hash keep = r.work_ns_hash();
     r.set_work_ns_hash(new_ns, "verify", "hub verification of #" + short_hash(new_head));
     json v = verify(r, false);
@@ -143,33 +163,32 @@ json HubService::push(ProjectStore& p, const json& req) {
       throw std::runtime_error("push: hub verification failed: " + v["failures"].dump());
     }
     report = v.dump();
+    r.set_work_ns_hash(keep, "verify", "hub verification done");
   }
+  // The report carries the test results; workspaces read them from here.
   p.set_verification(new_ns, "passed", report);
-  if (local && local->local_repo()) try {
-      record_test_results(local->local_repo()->store(), json::parse(report));
-    } catch (...) {
-    }
 
   if (!p.cas_branch(branch, old_head, new_head))
     throw std::runtime_error("push: " + branch + " moved on the hub; pull and retry");
   p.log_push(branch, old_head, new_head, agent);
 
-  // Sync this agent's locks.
-  for (auto& l : p.locks())
-    if (l.holder == agent) p.release(l.target, agent, false);
-  if (req.contains("locks"))
-    for (auto& l : req["locks"]) p.acquire({l.at("target"), l.at("name"), agent, l.at("expires")});
+  // Requests resolved by the commits this push brought are done now.
+  std::vector<std::string> landed;
+  for (auto& c : ancestors(p, new_head))
+    if (!known.count(c)) landed.push_back(c);
+  int done = p.coord().land(landed);
 
-  // Keep the hub's own working state, index and graph at the branch head.
-  if (local && local->local_repo()) {
-    Repo& r = *local->local_repo();
-    if (r.branch() == branch) {
-      json c = json::parse(must(p, new_head).body);
-      r.set_work_ns_hash(new_ns, "push", agent + " pushed #" + short_hash(new_head) + ": " + c.value("message", ""));
-      if (publish_on_push(r)) backend_.enqueue({0, p.name(), "publish", branch});
-    }
-  }
-  return {{"head", new_head}, {"branch", branch}};
+  // This agent's locks become the set it sent (released ones go to whoever queued).
+  std::vector<LockRec> keep;
+  for (auto& l : req.value("locks", json::array()))
+    keep.push_back({l.at("target"), l.value("name", ""), agent, l.value("work", ""), 0, l.value("expires", 0LL)});
+  p.coord().sync_locks(agent, keep);
+
+  // Keep the hub's working state, index and graph at the branch head.
+  Workspace* ws = workspace(p.name());
+  if (ws && ws->repo().branch() == branch && publish_on_push(ws->repo()))
+    backend_.enqueue({0, p.name(), "publish", branch});
+  return {{"head", new_head}, {"branch", branch}, {"requests_done", done}};
 }
 
 json HubService::handle(const std::string& project, const std::string& op, const json& req) {
@@ -182,7 +201,7 @@ json HubService::handle(const std::string& project, const std::string& op, const
 
   if (op == "refs") {
     json locks = json::array();
-    for (auto& l : p->locks()) locks.push_back(lock_json(l));
+    for (auto& l : p->coord().locks()) locks.push_back(lock_json(l));
     return {{"branches", p->branches()}, {"locks", locks}};
   }
   if (op == "missing") {
@@ -262,16 +281,19 @@ json HubService::handle(const std::string& project, const std::string& op, const
   }
   if (op == "lock") {
     long long minutes = req.value("minutes", 15);
-    HubLock l{req.at("target"), req.value("name", ""), req.at("agent"), now_seconds() + 60 * minutes};
-    if (auto b = p->acquire(l)) return {{"ok", false}, {"held_by", lock_json(*b)}};
+    long long now = now_seconds();
+    LockRec l{req.at("target"), req.value("name", ""), req.at("agent"), req.value("work", ""), now, now + 60 * minutes};
+    if (auto b = p->coord().acquire(l)) return {{"ok", false}, {"held_by", lock_json(*b)}};
     return {{"ok", true}, {"lock", lock_json(l)}};
   }
-  if (op == "unlock") return {{"released", p->release(req.at("target"), req.value("agent", ""), req.value("force", false))}};
+  if (op == "unlock")
+    return {{"released", p->coord().release(req.at("target"), req.value("agent", ""), req.value("force", false))}};
   if (op == "locks") {
     json locks = json::array();
-    for (auto& l : p->locks()) locks.push_back(lock_json(l));
+    for (auto& l : p->coord().locks()) locks.push_back(lock_json(l));
     return {{"locks", locks}};
   }
+  if (op == "coord") return coord_dispatch(p->coord(), req);
   throw std::runtime_error("unknown operation " + op);
 }
 
@@ -280,10 +302,9 @@ int HubService::run_jobs() {
   while (auto j = backend_.next_job()) {
     std::string result;
     try {
-      auto p = backend_.project(j->project, false);
-      auto* local = p ? dynamic_cast<LocalRepoAccess*>(p.get()) : nullptr;
-      if (!local || !local->local_repo()) throw std::runtime_error("no local project for job");
-      if (j->kind == "publish") result = publish(*local->local_repo(), j->arg).dump();
+      Workspace* ws = workspace(j->project);
+      if (!ws) throw std::runtime_error("no project " + j->project);
+      if (j->kind == "publish") result = publish(ws->repo(), j->arg).dump();
       else result = "unknown job kind";
     } catch (std::exception& e) {
       result = std::string("error: ") + e.what();
@@ -292,6 +313,37 @@ int HubService::run_jobs() {
     ++n;
   }
   return n;
+}
+
+// Webhooks: each subscription gets its agent's new events, in order, as
+// {project, agent, events}. A failed post is retried on the next round.
+int HubService::deliver_webhooks() {
+  int posts = 0;
+  for (auto& name : backend_.projects()) {
+    auto p = backend_.project(name, false);
+    if (!p) continue;
+    Coordination& c = p->coord();
+    for (auto& sub : c.subscriptions()) {
+      auto events = c.events(sub.agent, sub.after, 50);
+      if (events.empty()) continue;
+      json arr = json::array();
+      for (auto& e : events) arr.push_back(e.to_json());
+      size_t scheme = sub.url.find("://");
+      size_t slash = sub.url.find('/', scheme + 3);
+      std::string base = sub.url.substr(0, slash);
+      std::string path = slash == std::string::npos ? "/" : sub.url.substr(slash);
+      try {
+        httplib::Client cli(base);
+        cli.set_connection_timeout(5);
+        cli.set_read_timeout(10);
+        auto res = cli.Post(path, json{{"project", name}, {"agent", sub.agent}, {"events", arr}}.dump(), "application/json");
+        ++posts;
+        if (res && res->status >= 200 && res->status < 300) c.set_subscription_cursor(sub.id, events.back().seq);
+      } catch (...) {
+      }
+    }
+  }
+  return posts;
 }
 
 }  // namespace hs

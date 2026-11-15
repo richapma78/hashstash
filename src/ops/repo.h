@@ -15,6 +15,8 @@
 
 namespace hs {
 
+class Coordination;
+
 struct Config {
   std::string project;
   std::string author;
@@ -23,6 +25,7 @@ struct Config {
   int lock_minutes = 15;
   std::vector<std::string> ignore;  // extra glob patterns for import
   std::string tests_require = "warn";      // off | warn | block
+  std::string requests_on_commit = "block";  // [work] requests: open change requests on what you commit: block | warn
   std::vector<std::string> tests_exempt;   // short-name globs that need no tests
   std::string test_command_python = "python -m pytest -q {tests}";
   int tests_impact_depth = 3;              // verify also runs tests of callers this deep (0 = off)
@@ -64,6 +67,11 @@ class Repo {
   std::string agent() const;
   void set_agent(const std::string& a) { agent_ = a; }
 
+  // Where locks, work items and requests live when not the usual place (this
+  // project's hub, or its own store): the hub's workspace sets its backend.
+  Coordination* coordination_override() const { return coord_override_; }
+  void set_coordination_override(Coordination* c) { coord_override_ = c; }
+
  private:
   Repo(fs::path root);
   void load_config();
@@ -71,6 +79,7 @@ class Repo {
   std::unique_ptr<Store> store_;
   Config config_;
   std::string agent_;
+  Coordination* coord_override_ = nullptr;
 };
 
 Hash empty_namespace(Store& s);

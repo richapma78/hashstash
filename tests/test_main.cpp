@@ -16,6 +16,9 @@
 #include "ops/edit.h"
 #include "hub/backend.h"
 #include "hub/service.h"
+#include "hub/workspace.h"
+#include "mcp/server.h"
+#include "ops/work.h"
 #include "ops/history.h"
 #include "ops/locks.h"
 #include "ops/publish.h"
@@ -385,7 +388,7 @@ TEST(hub_sync) {
     CHECK(stale);
 
     // Hub publishes the branch to a git working copy.
-    Repo* hub_repo = dynamic_cast<LocalRepoAccess*>(backend->project("demo", false).get())->local_repo();
+    Repo* hub_repo = backend->project("demo", false)->native_repo();
     write_file(hub_repo->hs_dir() / "config.toml",
                read_file(hub_repo->hs_dir() / "config.toml") + "\n[publish]\ngit_dir = \"git-out\"\n");
     auto hub_repo2 = Repo::open(hub_repo->root());
@@ -475,7 +478,7 @@ TEST(review_flags_and_sync) {
     auto pr = push(*a, hub);
     CHECK(pr["reviews_sent"] == 2);
     CHECK(pr["commits"] == 1 && pr["human_reviewed"] == 1);
-    Repo* h = dynamic_cast<LocalRepoAccess*>(backend->project("demo", false).get())->local_repo();
+    Repo* h = backend->project("demo", false)->native_repo();
     CHECK(review_status(h->store(), c1).level == "human");
     CHECK(push_log(h->store(), 10).size() == 1);
 
@@ -498,6 +501,250 @@ TEST(review_flags_and_sync) {
     set_lock_transport_override(nullptr);
   }
   fs::remove_all(dir);
+}
+
+static void mark_verified(Repo& r) {
+  r.store().exec("INSERT OR IGNORE INTO verification(ns, status, time, agent, report) "
+                 "SELECT value, 'passed', 0, 'test', '{}' FROM ref WHERE name = 'work/main'");
+}
+
+static bool throws(const std::function<void()>& f) {
+  try {
+    f();
+  } catch (std::exception&) {
+    return true;
+  }
+  return false;
+}
+
+static bool has_lock(const nlohmann::json& locks, const std::string& target, const std::string& holder,
+                     const std::string& work) {
+  for (auto& l : locks)
+    if (l["target"] == target && l["holder"] == holder && l["work"] == work) return true;
+  return false;
+}
+
+// Two agents through a hub: a change request on a locked function is made by
+// the holder before it commits, with the requester's test; a lock request is
+// granted when the holder lets go.
+TEST(work_requests_over_hub) {
+  fs::path dir = temp_dir("work_hub");
+  {
+    auto backend = make_sqlite_backend(to_generic(dir / "hub"));
+    HubService svc(*backend);
+    svc.handle("demo", "create", {});
+    InProcessHub hub(svc, "demo");
+    set_lock_transport_override(&hub);
+
+    auto a = Repo::init(dir / "a", "demo");
+    a->set_agent("agent-a");
+    set_remote(*a, "origin", "http://unused/demo");
+    import_path(*a, fs::path(HS_FIXTURES) / "sample_project");
+    commit(*a, "import");
+    mark_verified(*a);
+    push(*a, hub);
+    auto b = Repo::init(dir / "b", "demo");
+    b->set_agent("agent-b");
+    set_remote(*b, "origin", "http://unused/demo");
+    pull(*b, hub);
+
+    WorkItem fa;
+    fa.id = "FEAT-12";
+    fa.title = "simpler arithmetic";
+    start_work(*a, fa);
+    WorkItem fb;
+    fb.id = "BUG-7";
+    fb.kind = "bug";
+    fb.title = "mul with negative numbers";
+    start_work(*b, fb);
+    CHECK(coordination(*b)->work("BUG-7")->priority == 2);  // bugs go first by default
+
+    // A locks mul for FEAT-12; everyone can see what the lock is for.
+    IndexRow mul = resolve_name(*a, "mul");
+    acquire_lock(*a, mul.lineage, mul.qname);
+    CHECK(has_lock(svc.handle("demo", "locks", {})["locks"], mul.lineage, "agent-a", "FEAT-12"));
+    CHECK(throws([&] { acquire_lock(*b, mul.lineage, mul.qname); }));
+
+    // B doesn't wait: it asks A for the change, with a test that must pass.
+    std::string test_code = "def test_mul_negative():\n    assert mul(-2, 3) == -6\n";
+    Request rq = make_request(*b, "mul", "change", "make mul work for a negative multiplicand", "tests/test_ops.py",
+                              test_code);
+    CHECK(rq.holder == "agent-a" && rq.holder_work == "FEAT-12" && rq.priority == 2 && rq.status == "open");
+    auto ea = inbox(*a, true);
+    CHECK(ea.size() == 1 && ea[0].kind == "request_new");
+    CHECK(inbox(*a, true).empty());  // the cursor moved
+
+    // A changes mul; committing it with B's request still open is refused.
+    Namespace ns = a->work_ns();
+    auto e = replace_def(*a, ns, mul.qname, "def mul(a, b):\n    return a * b\n", "", "simpler");
+    CHECK(e.ok);
+    commit_edits(*a, ns, {&e});
+    CHECK(throws([&] { commit_work(*a, "simpler mul"); }));
+
+    // A accepts: B's test becomes one of mul's tests, so verify runs it.
+    accept_request(*a, rq.id);
+    CHECK(tests_info(*a, mul.qname).dump().find("test_mul_negative") != std::string::npos);
+    auto eb = inbox(*b, true);
+    CHECK(!eb.empty() && eb.back().kind == "request_accepted");
+    auto wc = commit_work(*a, "simpler mul; works for negatives too", {rq.id});
+    CHECK(wc.resolved.size() == 1 && wc.landed == 0);
+    CHECK(coordination(*a)->request(rq.id)->status == "resolved");  // made, not shared yet
+
+    // The push brings the commit to the hub: done, and B is told.
+    mark_verified(*a);
+    push(*a, hub);
+    CHECK(coordination(*a)->request(rq.id)->status == "done");
+    auto eb2 = inbox(*b, true);
+    CHECK(!eb2.empty() && eb2.back().kind == "request_done");
+    CHECK(describe_event(eb2.back()).find("pull") != std::string::npos);
+    pull(*b, hub);
+    CHECK(render_def(b->store(), resolve_name(*b, "mul").hash) == "def mul(a, b):\n    return a * b\n");
+
+    // Lock queue: B waits for add; when A lets go, the lock is B's.
+    IndexRow add = resolve_name(*a, "add");
+    acquire_lock(*a, add.lineage, add.qname);
+    Request q = make_request(*b, "add", "lock", "");
+    CHECK(q.kind == "lock" && q.holder == "agent-a");
+    release_lock(*a, add.lineage);
+    CHECK(has_lock(svc.handle("demo", "locks", {})["locks"], add.lineage, "agent-b", "BUG-7"));
+    CHECK(coordination(*b)->request(q.id)->status == "granted");
+    auto eb3 = inbox(*b, true);
+    CHECK(!eb3.empty() && eb3.back().kind == "lock_granted");
+    pull(*b, hub);  // brings the lock handed to B into its own store
+    auto lb = lock_on(*b, add.lineage);
+    CHECK(lb && lb->holder == "agent-b");
+    set_lock_transport_override(nullptr);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// Several agents on one project without a hub: committing is sharing, an
+// expired lease hands the lock on, and a declined request queues for the lock.
+TEST(work_requests_local) {
+  fs::path dir = temp_dir("work_local");
+  {
+    auto r = Repo::init(dir / "p", "demo");
+    r->set_agent("agent-a");
+    import_path(*r, fs::path(HS_FIXTURES) / "sample_project");
+    commit(*r, "import");
+    WorkItem wa;
+    wa.id = "FEAT-1";
+    wa.title = "faster mul";
+    start_work(*r, wa);
+    IndexRow mul = resolve_name(*r, "mul");
+    acquire_lock(*r, mul.lineage, mul.qname);
+
+    r->set_agent("agent-b");
+    CHECK(current_work_id(*r) == "adhoc-agent-b");  // no item yet: an ad-hoc one
+    CHECK(throws([&] { acquire_lock(*r, mul.lineage, mul.qname); }));
+    Request rq = make_request(*r, "mul", "change", "keep accepting floats");
+    CHECK(rq.requester_work == "adhoc-agent-b");
+
+    r->set_agent("agent-a");
+    Namespace ns = r->work_ns();
+    auto e = replace_def(*r, ns, mul.qname, "def mul(a, b):\n    return a * b\n", "", "faster");
+    commit_edits(*r, ns, {&e});
+    CHECK(throws([&] { commit_work(*r, "faster mul"); }));
+    CHECK(throws([&] { commit_work(*r, "faster mul", {rq.id + 99}); }));
+    auto wc = commit_work(*r, "faster mul, floats still work", {rq.id});
+    CHECK(wc.landed == 1);  // no hub: the commit is already shared
+    CHECK(!lock_on(*r, mul.lineage));
+
+    r->set_agent("agent-b");
+    auto ev = inbox(*r, true);
+    CHECK(!ev.empty() && ev.back().kind == "request_done");
+
+    // A lease that runs out hands the lock to whoever queued for it.
+    r->set_agent("agent-a");
+    IndexRow add = resolve_name(*r, "add");
+    acquire_lock(*r, add.lineage, add.qname);
+    r->set_agent("agent-b");
+    make_request(*r, "add", "lock", "");
+    r->store().exec("UPDATE lock SET expires = 1");
+    bool handed = false;
+    for (auto& l : coordination(*r)->locks()) handed |= l.target == add.lineage && l.holder == "agent-b";
+    CHECK(handed);
+
+    // B holds add now. A asks for a change, B declines: A is queued for the
+    // lock instead, and gets it when B lets go.
+    r->set_agent("agent-a");
+    Request r2 = make_request(*r, "add", "change", "rename the arguments");
+    r->set_agent("agent-b");
+    CHECK(throws([&] { decline_request(*r, r2.id, ""); }));  // a reason is required
+    decline_request(*r, r2.id, "out of scope for my change");
+    release_lock(*r, add.lineage);
+    auto l = lock_on(*r, add.lineage);
+    CHECK(l && l->holder == "agent-a");
+    r->set_agent("agent-a");
+    auto ea = inbox(*r, true);
+    CHECK(ea.size() >= 2 && ea[ea.size() - 2].kind == "request_declined" && ea.back().kind == "lock_granted");
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// The hub working the way it would on any non-SQLite backend: a cached
+// workspace built only from the backend interfaces serves the MCP tools and
+// publishing, and writes its changes back.
+TEST(hub_cached_workspace) {
+  fs::path dir = temp_dir("hub_cache");
+  {
+    auto backend = make_sqlite_backend(to_generic(dir / "hub"));
+    HubOptions opt;
+    opt.force_cache = true;
+    opt.cache_dir = to_generic(dir / "cache");
+    HubService svc(*backend, opt);
+    svc.handle("demo", "create", {});
+    InProcessHub hub(svc, "demo");
+    set_lock_transport_override(&hub);
+
+    auto a = Repo::init(dir / "a", "demo");
+    a->set_agent("agent-a");
+    set_remote(*a, "origin", "http://unused/demo");
+    import_path(*a, fs::path(HS_FIXTURES) / "sample_project");
+    commit(*a, "import");
+    mark_verified(*a);
+    push(*a, hub);
+
+    Workspace* ws = svc.workspace("demo");
+    CHECK(ws && ws->cached());
+    Repo* native = backend->project("demo", false)->native_repo();
+    CHECK(ws->repo().root() != native->root());
+    CHECK(ws->repo().work_ns_hash() == a->work_ns_hash());
+    CHECK(resolve_name(ws->repo(), "mul").qname == "calc/ops.py:mul");
+
+    // An agent using the hub's MCP endpoint edits and commits in the cache...
+    ws->repo().set_agent("web-agent");
+    McpServer mcp(ws->repo());
+    auto call = [&](const std::string& tool, const nlohmann::json& args) {
+      return mcp.handle({{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"},
+                         {"params", {{"name", tool}, {"arguments", args}}}});
+    };
+    auto r1 = call("hs_add_def", {{"file", "calc/ops.py"}, {"code", "def neg(a):\n    return -a\n"}, {"reason", "negation"}});
+    CHECK(r1["result"]["isError"] == false);
+    auto r2 = call("hs_commit", {{"message", "add neg"}});
+    CHECK(r2["result"]["isError"] == false);
+    ws->save("web-agent");
+    ws->repo().set_agent("hub");
+    // ...and the backend has it, so a client pulls it.
+    CHECK(backend->project("demo", false)->branches()["main"] == *ws->repo().head_commit());
+    auto pl = pull(*a, hub);
+    CHECK(starts_with(pl["result"].get<std::string>(), "fast-forward"));
+    CHECK(resolve_name(*a, "neg").qname == "calc/ops.py:neg");
+
+    // Publishing runs as a job on the cached workspace; its config comes from the backend.
+    fs::path git_out = dir / "git-out";
+    write_file(native->hs_dir() / "config.toml", read_file(native->hs_dir() / "config.toml") +
+                                                     "\n[publish]\ngit_dir = \"" + to_generic(git_out) + "\"\n");
+    backend->enqueue({0, "demo", "publish", "main"});
+    CHECK(svc.run_jobs() == 1);
+    CHECK(fs::exists(git_out / "calc" / "ops.py") &&
+          read_file(git_out / "calc" / "ops.py").find("def neg(a):") != std::string::npos);
+    set_lock_transport_override(nullptr);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
 }
 
 TEST(roundtrip_corpus) {

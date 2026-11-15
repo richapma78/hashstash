@@ -260,6 +260,56 @@ so they follow renames, roll back with history and sync with pushes.
 * `hs lock`, `hs unlock` and `hs locks` (list), with matching MCP tools.
 * Opening a definition for editing (`hs edit`, MCP `hs_edit_def`) takes its lock.
   Edits happen in the local store; syncing with a hub carries the locks with it.
+* A lock is held until the definition is **committed**, not until the whole feature
+  is done, so locks stay short.
+
+### Work items, requests and events
+
+hashstash exists so that many agents can work on one codebase at once. Waiting on a
+lock is the thing to avoid, so locks carry intent and agents queue work, not themselves.
+
+* **Work items.** Every lock is taken for a work item: `hs work start FEAT-12 --title
+  "..." [--kind feature|bug|chore] [--priority N]`. Others see it on the lock
+  ("locked by agent-2 for FEAT-12"). An agent without one gets an ad-hoc chore item,
+  so nobody is forced through ceremony. Default priority: bug 2, feature 1, chore 0.
+* **Change requests.** An agent that needs a definition someone else holds logs what
+  it needs (`hs request <name> --need "..." [--test-file f --test-code file]`, MCP
+  `hs_request`) and carries on. The holder is told. While the request is open, the
+  holder's commit of that definition is refused (`[work] requests = "block"`, or
+  `"warn"`), so it takes the work on: accept it (the requester's test code is added
+  and linked to the definition, so the verify gate holds the change to both agents'
+  tests), make the change, verify, and commit with `--resolves <id>`. Or decline with a
+  reason, which queues the requester for the lock instead. The request is **done**
+  when the resolving commit reaches the shared branch (the push is accepted by the
+  hub, or the commit itself when there is no hub), and the requester is told, with
+  the commit to pull.
+* **Lock requests.** `hs request <name> --lock` queues for the lock. When it is released,
+  or its lease runs out, it goes to the first queued request (highest priority, then
+  oldest). A lock released while change requests are still open goes to the first
+  requester ("returned"), and the remaining requests now wait on the new holder, so
+  nothing stalls on an agent that went away.
+* **Events.** Each of these steps appends an event for the agent concerned
+  (`request_new`, `request_accepted`, `request_declined`, `request_cancelled`,
+  `request_done`, `lock_granted`). How an agent hears of them is up to the agent:
+  * `hs inbox [--wait S] [--follow]` and MCP `hs_inbox` read them since the agent's
+    cursor. `--wait` long-polls the hub. The exit code is 0 when something arrived and
+    3 when nothing did, so a background `hs inbox --wait 600` (or a Claude Code
+    Monitor on `hs inbox --follow`) wakes the agent exactly when there is news.
+  * `hs mcp --channel` pushes each event into the session as a
+    `notifications/claude/channel` message (Claude Code channels, a research preview,
+    stdio only, enabled with `--dangerously-load-development-channels server:<name>`).
+    Other MCP clients ignore it.
+  * `hs subscribe <url>`: the hub posts the agent's events to a webhook, in order,
+    retrying until the endpoint answers 2xx.
+  * At scale, the same event log can feed a message broker (Kafka, NATS, Redis
+    Streams, ActiveMQ) as one more delivery adapter. It is not needed below many
+    dozens of agents.
+* Identity is by agent name (`HS_AGENT`, `--as`, or one per MCP session), so an agent
+  that should keep its inbox across restarts sets `HS_AGENT`.
+* All of this sits behind one interface (`Coordination`, `src/ops/coord.h`): SQL on a
+  project store (a local project shared by several agents, or the hub's SQLite
+  backend), or the hub over HTTP for a client whose project has one. Every change is
+  one transaction, and nothing lives in server memory.
 
 ## 7. Diffs and merges
 
@@ -318,8 +368,9 @@ when the two sides have diverged.
 
 ### Hub storage and scale
 
-`hshub` is written against two interfaces, `HubBackend` (projects, jobs) and
-`ProjectStore` (objects, refs, locks, verification records), in `src/hub/backend.h`.
+`hshub` is written against two interfaces, `HubBackend` (projects, jobs, MCP sessions)
+and `ProjectStore` (objects, refs, coordination, verification records, reviews, push
+log), in `src/hub/backend.h`.
 The first backend keeps one SQLite store per project, which suits one machine or a
 small team. The interfaces are shaped for the way GitHub and similar hosts scale:
 
@@ -327,13 +378,25 @@ small team. The interfaces are shaped for the way GitHub and similar hosts scale
 |------|-------------|-------|
 | objects (immutable, content-addressed) | SQLite per project | object store sharded by hash prefix (S3/GCS/Ceph, or a cluster of storage nodes like GitHub's Spokes); safe to cache and replicate anywhere because a hash never changes meaning |
 | refs (branch heads) | SQLite | Postgres or another transactional database; a push is one compare-and-swap row update |
-| locks | SQLite | Postgres or Redis, with lease expiry |
+| coordination (locks, work items, requests, events) | SQLite | Postgres (the statements are portable), events optionally mirrored to a broker |
+| MCP sessions | `hub.db` | Postgres or Redis |
 | index and graphs | rebuilt per project | derived data: rebuilt by workers from the objects, then served from replicas or a search cluster |
 | jobs (publish, verify) | `hub.db` queue | a real queue (Postgres `SKIP LOCKED`, SQS, Redis streams) feeding worker pools |
 
 Because objects are immutable and every head move is a compare-and-swap, the HTTP
 servers hold no state and can run behind a load balancer in any number. The only
-thing that needs strong consistency is the ref and lock table.
+thing that needs strong consistency is the ref and coordination tables.
+
+**Workspaces.** Verify-on-push, publishing, the hub's MCP tools and the review pages
+need a full project to run the ops library on. They get it from a `Workspace`
+(`src/hub/workspace.h`), never from the backend directly. A backend whose storage
+already is a hashstash project (SQLite) offers it through `native_repo()`. Any other
+backend gets a cached workspace: a local project brought up to date from the
+backend's objects, refs, verification reports, reviews and push log before each use,
+with its own changes (commits and edits made through the hub's MCP tools, reviews made
+on the pages) written back by compare-and-swap afterwards. `hshub serve --force-cache`
+runs a SQLite hub that way, and the unit tests do too, so the path a scaled hub takes
+is exercised all the time.
 
 ### Publishing to git ("nightly builds")
 
@@ -383,9 +446,15 @@ hs tests ...                     show / link / unlink / suggest / autolink / mis
 hs note <name> <a>-<b> <text>    comment on a region, kept beside the code
 hs why <name> <text>             record origin / design / change context
 hs lock / unlock / locks
+hs work start <id> --title ... / work / work list / work done
+hs request <name> --need ... [--test-file f --test-code file] | --lock
+hs request accept|decline|cancel <id> / hs requests
+hs commit ... --resolves <ids>   commit that makes requested changes
+hs inbox [--wait S] [--follow]   events: requests, answers, granted locks, done
+hs subscribe <url> / unsubscribe webhook delivery of your events
 hs graph callers|callees|reach|impact|path|unused|cycles|entry
 hs render [--out dir] [--at ref] generate source files
-hs mcp                           MCP server over stdio for this project
+hs mcp [--channel]               MCP server over stdio; --channel pushes events
 hs remote add <name> <url> / hs remotes
 hs clone <url> [dir]             copy a hub project into a new local store
 hs push [remote]                 verified, fast-forward push; carries locks
@@ -400,7 +469,7 @@ hs fragment <name> <lines>       cut a fragment out of a large definition
 ### Hub (`hshub`)
 
 ```
-hshub serve --root <dir> [--port 7420] [--token T] [--review-token R]
+hshub serve --root <dir> [--port 7420] [--token T] [--review-token R] [--cache dir] [--force-cache]
                                   HTTP sync, locks, MCP at /mcp/<project>, review pages at /ui
 hshub create <project> --root <dir>
 hshub list --root <dir>
@@ -413,7 +482,8 @@ The same tool set is served by `hs mcp` (stdio, local project) and by `hshub`
 (HTTP, hosted projects). Tools describe themselves, so agents need no imported skill:
 
 `hs_status`, `hs_find`, `hs_list`, `hs_view`, `hs_context`, `hs_graph`, `hs_lock`,
-`hs_unlock`, `hs_locks`, `hs_edit_def`, `hs_add_def`, `hs_delete_def`, `hs_tests`,
+`hs_unlock`, `hs_locks`, `hs_work`, `hs_request`, `hs_requests`,
+`hs_request_respond`, `hs_inbox`, `hs_edit_def`, `hs_add_def`, `hs_delete_def`, `hs_tests`,
 `hs_link_tests`, `hs_unlink_tests`, `hs_missing_tests`, `hs_note`, `hs_why`, `hs_diff`,
 `hs_verify`, `hs_commit`, `hs_show`, `hs_review`, `hs_reviews`, `hs_test_summary`,
 `hs_log`, `hs_history`, `hs_rollback`, `hs_render`, `hs_remotes`, `hs_pull`,
@@ -440,10 +510,11 @@ definitions without tests.
 ```
 src/core/      hashing, objects, canonical encoding, store (SQLite)
 src/lang/      language adapters over tree-sitter: python, c, cpp
-src/ops/       import, render, edit/update, diff, merge, locks, graph, sync, reviews
+src/ops/       import, render, edit/update, diff, merge, locks, graph, sync, reviews,
+               coordination (work items, requests, events) and work (their operations)
 src/mcp/       MCP protocol and tool definitions
 src/cli/       hs
-src/hub/       hub service, storage interfaces, SQLite backend
+src/hub/       hub service, storage interfaces, SQLite backend, workspaces
 src/server/    hshub (HTTP server, job worker)
 src/web/       review pages (served by hs ui and hshub)
 tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub.sh, live_python.sh

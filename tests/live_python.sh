@@ -107,5 +107,76 @@ run render --out ../calc-out
 out=$(cd ../calc-out && python -m pytest -q 2>&1 | tail -1); echo "$out"
 expect '[[ "$out" == *"4 passed"* ]]' "rendered files pass pytest"
 
+echo; echo "=== work items: alice needs a change in a function bob holds"
+cd "$W/calc-bob"; export HS_AGENT=bob
+run work start FEAT-12 --title "Calculator memory improvements"
+run lock calc/ops.py:add
+cd "$W/calc-alice"; export HS_AGENT=alice
+run work start BUG-7 --kind bug --title "add crashes on None"
+out=$("$HS" lock calc/ops.py:add 2>&1); echo "$out"
+expect '[[ "$out" == *"locked on the hub by bob for FEAT-12"* ]]' "the lock says what it is for"
+printf 'def test_add_none():\n    assert add(None, 2) == 2\n' > ../need_test.py
+run request calc/ops.py:add --need "treat None as 0" --test-file tests/test_ops.py --test-code ../need_test.py
+# Alice waits for the answer in the background (a long poll on the hub).
+("$HS" inbox --wait 60 > ../alice-wait.txt; echo "exit $?" >> ../alice-wait.txt) &
+waiter=$!
+
+cd "$W/calc-bob"; export HS_AGENT=bob
+out=$("$HS" inbox); echo "$out"
+expect '[[ "$out" == *"needs a change in calc/ops.py:add"* ]]' "bob is told about the request"
+"$HS" edit calc/ops.py:add > /dev/null
+python - .hs/scratch/edit.py <<'EOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+assert "return a + b" in s
+open(p, "w", encoding="utf-8").write(s.replace("return a + b", "return (a or 0) + (b or 0)"))
+EOF
+run update -m "Treat None as 0"
+out=$("$HS" commit -m "add: treat None as 0" 2>&1); echo "$out"
+expect '[[ "$out" == *"other agents are waiting"* ]]' "commit refused while the request is open"
+rid=$("$HS" requests --json | python -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
+run request accept "$rid"
+out=$("$HS" verify); echo "$out"
+expect '[[ "$out" == *"Verification passed"* ]]' "verify passes with alice's test linked"
+expect '[[ "$("$HS" tests calc/ops.py:add)" == *"test_add_none"* ]]' "alice's test is linked to add"
+run commit -m "add: treat None as 0 (for BUG-7)" --resolves "$rid"
+run push
+wait $waiter
+out=$(cat ../alice-wait.txt); echo "$out"
+expect '[[ "$out" == *"accepted your request"* && "$out" == *"exit 0"* ]]' "alice's long poll woke on the answer"
+cd "$W/calc-alice"; export HS_AGENT=alice
+out=$("$HS" inbox); echo "$out"
+expect '[[ "$out" == *"done. bob made your change"* ]]' "alice is told it is done"
+
+echo; echo "=== MCP channel: an agent session is pushed its events"
+cd "$W/calc-bob"; HS_AGENT=bob "$HS" lock calc/ops.py:Calculator.apply
+cd "$W/calc-alice"
+out=$(python - "$HS" "$W/calc-bob" <<'EOF'
+import json, os, queue, subprocess, sys, threading
+hs, bob_dir = sys.argv[1], sys.argv[2]
+env = dict(os.environ, HS_AGENT="alice")
+p = subprocess.Popen([hs, "mcp", "--channel"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+lines = queue.Queue()
+threading.Thread(target=lambda: [lines.put(l) for l in p.stdout], daemon=True).start()
+def send(m):
+    p.stdin.write((json.dumps(m) + "\n").encode()); p.stdin.flush()
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "clientInfo": {"name": "t"}}})
+init = json.loads(lines.get(timeout=20))
+print("channel capability:", "claude/channel" in init["result"]["capabilities"].get("experimental", {}))
+send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "hs_request", "arguments": {"name": "calc/ops.py:Calculator.apply", "kind": "lock"}}})
+print("request:", json.loads(lines.get(timeout=20))["result"]["isError"] is False)
+subprocess.run([hs, "unlock", "calc/ops.py:Calculator.apply"], cwd=bob_dir, env=dict(os.environ, HS_AGENT="bob"), check=True)
+while True:
+    m = json.loads(lines.get(timeout=40))
+    if m.get("method") == "notifications/claude/channel":
+        print("pushed:", m["params"]["content"])
+        break
+p.stdin.close(); p.terminate()
+EOF
+); echo "$out"
+expect '[[ "$out" == *"channel capability: True"* ]]' "hs mcp --channel declares claude/channel"
+expect '[[ "$out" == *"pushed: hashstash:"*"you now hold the lock on calc/ops.py:Calculator.apply"* ]]' "the granted lock is pushed into the session"
+
 echo
 if [ $fails -eq 0 ]; then echo "live_python: all checks passed"; else echo "live_python: $fails check(s) FAILED"; exit 1; fi
