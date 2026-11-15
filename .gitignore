@@ -1,0 +1,20 @@
+# Private folder
+secret/
+
+# Claude Code: project settings, memory, instructions, conversation transcripts
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+**/CLAUDE.md
+**/CLAUDE.local.md
+*.jsonl
+.staged/
+
+# Readme (any case)
+[Rr][Ee][Aa][Dd][Mm][Ee].[Mm][Dd]
+
+# Local notes / environment
+.env
+.env.*
+*.local.*
+build/
