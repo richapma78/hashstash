@@ -10,6 +10,9 @@ using Hash = std::string;  // 52-char base32; empty means "none"
 
 Hash hash_bytes(std::string_view kind, std::string_view body);
 std::string short_hash(const Hash& h, size_t n = 10);
-std::string new_uuid();  // random 128-bit id, 32 hex chars
+std::string new_uuid();  // random 128-bit id, 32 hex chars (from the OS's secure generator)
+// n bytes from the operating system's cryptographically secure generator, as
+// 2n lowercase hex characters. For secrets: keys, session tokens, salts.
+std::string random_hex(size_t n);
 
 }  // namespace hs

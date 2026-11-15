@@ -35,6 +35,23 @@ std::shared_ptr<Coordination> coordination(Repo& repo) {
   return sql_coordination(repo.store(), repo.config().lock_minutes);
 }
 
+nlohmann::json apply_access_key(Repo& repo) {
+  if (access_key().empty() || !coordinated_by_hub(repo)) return json::object();
+  std::unique_ptr<HubTransport> owned;
+  HubTransport* t = lock_transport_override();
+  if (!t) {
+    owned = open_remote(repo, "origin");
+    t = owned.get();
+  }
+  json who = t->call("whoami", json::object());
+  if (who.value("role", "") == "worker") {
+    std::string work = who.value("work", "");
+    repo.set_agent(work);
+    repo.store().set_ref("workitem/" + work, work);
+  }
+  return who;
+}
+
 // Per agent, in this store: which work item it is on.
 static std::string work_ref(Repo& repo) { return "workitem/" + repo.agent(); }
 

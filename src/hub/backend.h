@@ -14,7 +14,9 @@
 //   jobs          queued background work (render, publish), so pushes return
 //                 fast and many stateless hub servers can share the load
 //   reviews       append-only records keyed by id, plus the push log
-//   sessions      MCP session state, so any hub server can serve any session
+//   sessions      MCP and sign-in session state, so any hub server can serve any session
+//   access        people who sign in, access keys (hashes only) and per-project
+//                 settings (see hub/access.h)
 //
 // The full ops library (verify, render, publish, MCP tools, review pages) runs
 // on a Workspace (hub/workspace.h) built from these interfaces, so no feature
@@ -101,6 +103,17 @@ class HubBackend {
   // MCP sessions (null if unknown or expired).
   virtual void save_session(const std::string& id, const nlohmann::json& data, long long expires) = 0;
   virtual nlohmann::json load_session(const std::string& id) = 0;
+  virtual void drop_session(const std::string& id) = 0;
+
+  // Access records, as JSON documents keyed by name / key id (null if none).
+  virtual void put_user(const nlohmann::json& user) = 0;  // {name, password, created}
+  virtual nlohmann::json user(const std::string& name) = 0;
+  virtual int user_count() = 0;
+  virtual void put_key(const nlohmann::json& key) = 0;    // {id, project, ...}; see AccessKey
+  virtual nlohmann::json key(const std::string& id) = 0;
+  virtual nlohmann::json keys(const std::string& project) = 0;  // array
+  virtual void set_setting(const std::string& name, const std::string& value) = 0;
+  virtual std::string setting(const std::string& name) = 0;    // "" if unset
 };
 
 // SQLite backend: one hashstash project store per hosted project under root.

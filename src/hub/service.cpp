@@ -92,6 +92,61 @@ std::map<std::string, Hash> lineage_hashes(ProjectStore& p, const Hash& ns_hash)
 
 json lock_json(const LockRec& l) { return l.to_json(); }
 
+// lineage -> "file:qualified.name" for a namespace.
+std::map<std::string, std::string> lineage_names(ProjectStore& p, const Hash& ns_hash) {
+  std::map<std::string, std::string> out;
+  if (ns_hash.empty()) return out;
+  json ns = json::parse(must(p, ns_hash).body);
+  for (auto& [q, id] : ns.at("lineage").items()) out[id.get<std::string>()] = q;
+  return out;
+}
+
+// Operations that change something, and coordination calls that do.
+const std::set<std::string> kWriteOps = {"push", "put_objects", "put_reviews", "lock", "unlock"};
+const std::set<std::string> kWriteCoord = {"acquire", "release", "sync_locks", "put_work",
+                                           "add_request", "update_request", "subscribe", "unsubscribe"};
+
+void need_scope(const Principal& who, const std::string& name) {
+  if (who.is_worker() && !Access::in_scope(who.scope, name))
+    throw std::runtime_error(name + " is outside your key's scope (" + who.scope + "): ask your orchestrator");
+}
+
+// A worker key acts as its work item: whatever identity the request names is
+// replaced by it, so one agent can't act as another.
+json bind_identity(const std::string& op, json req, const Principal& who) {
+  const std::string& w = who.work;
+  if (op == "lock") {
+    need_scope(who, req.value("name", ""));
+    req["agent"] = w, req["work"] = w;
+  } else if (op == "unlock") {
+    req["agent"] = w, req["force"] = false;
+  } else if (op == "push") {
+    req["agent"] = w;
+    if (req.contains("locks"))
+      for (auto& l : req["locks"]) l["work"] = w;
+  } else if (op == "coord") {
+    std::string m = req.value("method", "");
+    if (m == "acquire") {
+      need_scope(who, req["lock"].value("name", ""));
+      req["lock"]["holder"] = w, req["lock"]["work"] = w;
+    } else if (m == "release") {
+      req["holder"] = w, req["force"] = false;
+    } else if (m == "sync_locks") {
+      req["holder"] = w;
+    } else if (m == "put_work") {
+      if (req["work"].value("id", "") != w) throw std::runtime_error("your key is for work item " + w + " only");
+      req["work"]["owner"] = w;
+    } else if (m == "add_request") {
+      req["request"]["requester"] = w, req["request"]["requester_work"] = w;
+    } else if (m == "update_request") {
+      req["actor"] = w;
+    } else if (m == "subscribe" || m == "unsubscribe" || m == "events") {
+      req["agent"] = w;
+    }
+  }
+  return req;
+}
+
 std::string commit_ns(ProjectStore& p, const Hash& c) {
   if (c.empty()) return "";
   return json::parse(must(p, c).body).at("ns");
@@ -99,7 +154,7 @@ std::string commit_ns(ProjectStore& p, const Hash& c) {
 
 }  // namespace
 
-HubService::HubService(HubBackend& backend, HubOptions opt) : backend_(backend), opt_(std::move(opt)) {
+HubService::HubService(HubBackend& backend, HubOptions opt) : backend_(backend), access_(backend), opt_(std::move(opt)) {
   if (opt_.cache_dir.empty()) opt_.cache_dir = to_generic(fs::temp_directory_path() / "hshub-cache");
 }
 HubService::~HubService() = default;
@@ -116,7 +171,7 @@ Workspace* HubService::workspace(const std::string& project) {
   return it->second.get();
 }
 
-json HubService::push(ProjectStore& p, const json& req) {
+json HubService::push(ProjectStore& p, const json& req, const Principal& who) {
   std::string branch = req.value("branch", "main");
   Hash old_head = req.value("old", ""), new_head = req.at("new");
   std::string agent = req.value("agent", "someone");
@@ -140,6 +195,14 @@ json HubService::push(ProjectStore& p, const json& req) {
     if (!before.count(id) || before[id] != h) changed.insert(id);
   for (auto& [id, h] : before)
     if (!after.count(id)) changed.insert(id);
+  if (who.is_worker() && !who.scope.empty()) {
+    auto names = lineage_names(p, new_ns), old_names = lineage_names(p, old_ns);
+    for (auto& id : changed) {
+      std::string n = names.count(id) ? names[id] : old_names[id];
+      if (!Access::in_scope(who.scope, n))
+        throw std::runtime_error("push: " + n + " is outside your key's scope (" + who.scope + ")");
+    }
+  }
   for (auto& l : p.coord().locks())
     if (changed.count(l.target) && l.holder != agent)
       throw std::runtime_error("push: " + l.name + " is locked on the hub by " + l.holder +
@@ -191,7 +254,46 @@ json HubService::push(ProjectStore& p, const json& req) {
   return {{"head", new_head}, {"branch", branch}, {"requests_done", done}};
 }
 
-json HubService::handle(const std::string& project, const std::string& op, const json& req) {
+json HubService::handle(const std::string& project, const std::string& op, const json& req_in,
+                        const std::string& key) {
+  if (op == "create") return handle_op(project, op, req_in, {});
+  Principal who = access_.authenticate(project, key);
+  bool writes = kWriteOps.count(op) || (op == "coord" && kWriteCoord.count(req_in.value("method", "")));
+  if (writes && who.role.empty() && access_.required(project))
+    throw std::runtime_error("project " + project + " needs an access key to change anything: ask your orchestrator "
+                             "for one and set HS_WORK_KEY");
+  if (op == "whoami") return who.to_json();
+  if (op == "issue_key" || op == "keys" || op == "revoke_key") {
+    if (!who.is_orchestrator()) throw std::runtime_error(op + " needs an orchestrator key (HS_ORCH_KEY)");
+    if (op == "keys") {
+      json out = json::array();
+      for (auto& k : access_.keys(project)) out.push_back(k.to_json());
+      return {{"keys", out}};
+    }
+    if (op == "revoke_key") {
+      access_.revoke(project, req_in.at("id"), "", &who);
+      return {{"revoked", req_in.at("id")}};
+    }
+    auto p = backend_.project(project, false);
+    if (!p) throw std::runtime_error("no project '" + project + "' on this hub");
+    WorkItem w;
+    w.id = req_in.at("work");
+    w.owner = w.id;
+    w.title = req_in.value("title", "");
+    w.kind = req_in.value("kind", "");
+    w.link = req_in.value("link", "");
+    w.priority = req_in.value("priority", -1);
+    if (!p->coord().work(w.id) && w.title.empty())
+      throw std::runtime_error("new work item " + w.id + " needs a title (what it is for)");
+    p->coord().put_work(w);
+    auto issued = access_.issue_worker(who, w.id, req_in.value("scope", ""), req_in.value("hours", 24),
+                                       req_in.value("label", ""));
+    return {{"key", issued.key.to_json()}, {"text", issued.text}};
+  }
+  return handle_op(project, op, who.is_worker() ? bind_identity(op, req_in, who) : req_in, who);
+}
+
+json HubService::handle_op(const std::string& project, const std::string& op, const json& req, const Principal& who) {
   if (op == "create") {
     backend_.project(project, true);
     return {{"created", project}};
@@ -253,7 +355,7 @@ json HubService::handle(const std::string& project, const std::string& op, const
     }
     return {{"hashes", out}};
   }
-  if (op == "push") return push(*p, req);
+  if (op == "push") return push(*p, req, who);
   if (op == "put_reviews") {
     int n = 0;
     for (auto& r : req.at("reviews")) {

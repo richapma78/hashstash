@@ -38,4 +38,10 @@ struct UiSite {
 
 void mount_ui(httplib::Server& srv, const UiSite& site);
 
+// Shared with the hub's other pages (web/access_ui.h).
+std::string ui_page(const std::string& title, const std::string& project, const std::string& body);
+std::string html_esc(const std::string& s);
+std::string url_encode(const std::string& s);
+void ui_show_access_nav(bool on);  // hub: link each project's access page
+
 }  // namespace hs

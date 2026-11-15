@@ -119,6 +119,10 @@ class SqliteBackend : public HubBackend {
         "created INTEGER NOT NULL, result TEXT NOT NULL DEFAULT '')");
     jobs_->exec(
         "CREATE TABLE IF NOT EXISTS mcp_session (id TEXT PRIMARY KEY, data TEXT NOT NULL, expires INTEGER NOT NULL)");
+    jobs_->exec("CREATE TABLE IF NOT EXISTS hub_user (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
+    jobs_->exec(
+        "CREATE TABLE IF NOT EXISTS access_key (id TEXT PRIMARY KEY, project TEXT NOT NULL, data TEXT NOT NULL)");
+    jobs_->exec("CREATE TABLE IF NOT EXISTS hub_setting (name TEXT PRIMARY KEY, value TEXT NOT NULL)");
   }
 
   std::vector<std::string> projects() override {
@@ -178,6 +182,49 @@ class SqliteBackend : public HubBackend {
     Stmt old(jobs_->db(), "DELETE FROM mcp_session WHERE expires < ?");
     old.bind(1, now_seconds()).run();
   }
+  void drop_session(const std::string& id) override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "DELETE FROM mcp_session WHERE id = ?");
+    st.bind(1, id).run();
+  }
+
+  void put_user(const nlohmann::json& u) override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "INSERT OR REPLACE INTO hub_user(name, data) VALUES (?, ?)");
+    st.bind(1, u.at("name").get<std::string>()).bind(2, u.dump()).run();
+  }
+  nlohmann::json user(const std::string& name) override { return doc("SELECT data FROM hub_user WHERE name = ?", name); }
+  int user_count() override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "SELECT COUNT(*) FROM hub_user");
+    return st.step() ? (int)st.integer(0) : 0;
+  }
+  void put_key(const nlohmann::json& k) override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "INSERT OR REPLACE INTO access_key(id, project, data) VALUES (?, ?, ?)");
+    st.bind(1, k.at("id").get<std::string>()).bind(2, k.value("project", "")).bind(3, k.dump()).run();
+  }
+  nlohmann::json key(const std::string& id) override { return doc("SELECT data FROM access_key WHERE id = ?", id); }
+  nlohmann::json keys(const std::string& project) override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "SELECT data FROM access_key WHERE project = ? ORDER BY rowid");
+    st.bind(1, project);
+    nlohmann::json out = nlohmann::json::array();
+    while (st.step()) out.push_back(nlohmann::json::parse(st.text(0)));
+    return out;
+  }
+  void set_setting(const std::string& name, const std::string& value) override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "INSERT OR REPLACE INTO hub_setting(name, value) VALUES (?, ?)");
+    st.bind(1, name).bind(2, value).run();
+  }
+  std::string setting(const std::string& name) override {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), "SELECT value FROM hub_setting WHERE name = ?");
+    st.bind(1, name);
+    return st.step() ? st.text(0) : "";
+  }
+
   nlohmann::json load_session(const std::string& id) override {
     std::lock_guard<std::mutex> g(mu_);
     Stmt st(jobs_->db(), "SELECT data FROM mcp_session WHERE id = ? AND expires >= ?");
@@ -191,6 +238,14 @@ class SqliteBackend : public HubBackend {
   }
 
  private:
+  nlohmann::json doc(const char* sql, const std::string& key) {
+    std::lock_guard<std::mutex> g(mu_);
+    Stmt st(jobs_->db(), sql);
+    st.bind(1, key);
+    if (!st.step()) return nullptr;
+    return nlohmann::json::parse(st.text(0));
+  }
+
   fs::path root_;
   std::unique_ptr<Store> jobs_;
   std::mutex mu_;

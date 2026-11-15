@@ -37,7 +37,9 @@ class HttpTransport : public HubTransport {
     if (const char* t = std::getenv("HS_TOKEN"); t && *t) client_->set_bearer_token_auth(t);
   }
   json call(const std::string& op, const json& req) override {
-    auto res = client_->Post("/api/p/" + project_ + "/" + op, req.dump(), "application/json");
+    httplib::Headers headers;
+    if (std::string k = access_key(); !k.empty()) headers.emplace("X-HS-Key", k);
+    auto res = client_->Post("/api/p/" + project_ + "/" + op, headers, req.dump(), "application/json");
     if (!res) throw std::runtime_error("hub " + base_ + " unreachable (" + httplib::to_string(res.error()) + ")");
     json body;
     try {
@@ -196,6 +198,15 @@ std::string share_reviews(Repo& repo) {
 
 void set_lock_transport_override(HubTransport* t) { g_lock_override = t; }
 HubTransport* lock_transport_override() { return g_lock_override; }
+
+static std::string g_access_key;
+void set_access_key(const std::string& key) { g_access_key = key; }
+std::string access_key() {
+  if (!g_access_key.empty()) return g_access_key;
+  for (const char* v : {"HS_WORK_KEY", "HS_ORCH_KEY"})
+    if (const char* k = std::getenv(v); k && *k) return k;
+  return "";
+}
 
 void set_remote(Repo& repo, const std::string& name, const std::string& url) {
   repo.store().set_ref("remote/" + name, url);

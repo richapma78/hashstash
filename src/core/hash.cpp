@@ -1,4 +1,11 @@
+#ifdef _WIN32
+#define _CRT_RAND_S  // rand_s: the OS's secure generator (RtlGenRandom)
+#endif
 #include "core/hash.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <stdexcept>
 
 #include <blake3.h>
 
@@ -38,16 +45,37 @@ Hash hash_bytes(std::string_view kind, std::string_view body) {
 
 std::string short_hash(const Hash& h, size_t n) { return h.substr(0, n); }
 
-std::string new_uuid() {
-  static thread_local std::mt19937_64 rng{std::random_device{}() ^
-                                          (uint64_t)std::random_device{}() << 32};
+std::string random_hex(size_t n) {
   static const char* hex = "0123456789abcdef";
   std::string out;
-  for (int i = 0; i < 2; ++i) {
-    uint64_t v = rng();
-    for (int j = 0; j < 16; ++j) out.push_back(hex[(v >> (j * 4)) & 15]);
+  out.reserve(2 * n);
+#ifdef _WIN32
+  for (size_t i = 0; i < n; i += 4) {
+    unsigned int v = 0;
+    if (rand_s(&v) != 0) throw std::runtime_error("secure random generator failed");
+    for (size_t j = 0; j < 4 && i + j < n; ++j) {
+      unsigned char b = (unsigned char)(v >> (8 * j));
+      out.push_back(hex[b >> 4]);
+      out.push_back(hex[b & 15]);
+    }
   }
+#else
+  FILE* f = std::fopen("/dev/urandom", "rb");
+  if (!f) throw std::runtime_error("cannot open /dev/urandom");
+  for (size_t i = 0; i < n; ++i) {
+    int c = std::fgetc(f);
+    if (c == EOF) {
+      std::fclose(f);
+      throw std::runtime_error("cannot read /dev/urandom");
+    }
+    out.push_back(hex[(c >> 4) & 15]);
+    out.push_back(hex[c & 15]);
+  }
+  std::fclose(f);
+#endif
   return out;
 }
+
+std::string new_uuid() { return random_hex(16); }
 
 }  // namespace hs

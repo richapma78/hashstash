@@ -41,6 +41,11 @@ nlohmann::json pull(Repo& repo, HubTransport& hub, const std::string& remote = "
 void set_lock_transport_override(HubTransport* t);
 HubTransport* lock_transport_override();
 
+// The access key sent with every hub call (as X-HS-Key): one set for this
+// process (an MCP session given a key), else HS_WORK_KEY, else HS_ORCH_KEY.
+void set_access_key(const std::string& key);
+std::string access_key();
+
 // Reviews: send the ones made here, fetch the ones made elsewhere. push and
 // pull do both; these are for sending a new review right away.
 int send_reviews(Repo& repo, HubTransport& hub);

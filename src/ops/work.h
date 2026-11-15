@@ -33,6 +33,12 @@ std::shared_ptr<Coordination> coordination(Repo& repo);
 // True when coordination goes to a hub over the network (so commits land on push).
 bool coordinated_by_hub(Repo& repo);
 
+// With an access key (ops/sync.h), asks the hub who the key is and, for a
+// worker key, acts as its work item: the agent name and current work item
+// become the key's work item, so a replacement agent carries on with the same
+// locks, requests and inbox. Returns the hub's answer ({} without a key or hub).
+nlohmann::json apply_access_key(Repo& repo);
+
 // The agent's current work item id. Locks, requests and commits carry it.
 // When the agent has none, an ad-hoc chore item is made for it.
 std::string current_work_id(Repo& repo);

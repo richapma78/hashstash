@@ -305,11 +305,60 @@ lock is the thing to avoid, so locks carry intent and agents queue work, not the
     Streams, ActiveMQ) as one more delivery adapter. It is not needed below many
     dozens of agents.
 * Identity is by agent name (`HS_AGENT`, `--as`, or one per MCP session), so an agent
-  that should keep its inbox across restarts sets `HS_AGENT`.
+  that should keep its inbox across restarts sets `HS_AGENT`. On a hub with access
+  keys, the identity is the worker key's work item instead (below).
 * All of this sits behind one interface (`Coordination`, `src/ops/coord.h`): SQL on a
   project store (a local project shared by several agents, or the hub's SQLite
   backend), or the hub over HTTP for a client whose project has one. Every change is
   one transaction, and nothing lives in server memory.
+
+### Access keys: who may change what
+
+Agents are replaced and restarted with fresh contexts all the time, so an agent's
+name proves nothing. On a hub, the right to change a project comes from keys, with a
+person at the root:
+
+1. **People** are added on the hub machine (`hshub user add <name>`), so whoever
+   controls that machine is the root of trust. Once a hub has an account, its pages
+   need signing in (name and password, a session cookie that is HttpOnly and
+   SameSite=Strict, 12 hours).
+2. **Orchestrator keys.** A signed-in person opens a project's *Access* page and
+   creates an orchestrator key valid for a chosen number of days (1 to 366). It is shown
+   once and handed to the orchestrator agent in its environment (`HS_ORCH_KEY`), not
+   in a chat. `hshub key orchestrator <project> --days N` does the same on the hub
+   machine.
+3. **Worker keys.** The orchestrator runs `hs key issue FEAT-12 --title "..."
+   [--scope "src/net/**"] [--hours 8] [--out file]` for each piece of work and gives the
+   key to the agent doing it (`HS_WORK_KEY`, or the MCP tool `hs_use_key`). The work
+   item is created if new. A worker key never outlives its orchestrator key.
+4. **The key is the identity.** Whoever presents a worker key acts as its work item:
+   the agent name, lock holder, requester and inbox all become the work item. When an
+   agent is replaced, the orchestrator issues the new one a key for the same work item,
+   and it carries on with the same locks, requests and events. Whatever identity a
+   request names is overwritten with the key's, so one agent can't act as another.
+5. **The hub enforces it.** Creating the first orchestrator key switches the project
+   to requiring keys (a person can switch it off on the Access page). From then on,
+   anything that changes the project needs a valid key: locking, unlocking, editing
+   through the hub's MCP tools, requests, work items, subscriptions and pushes. Reading
+   stays open to anyone with the hub token. A worker key's scope (comma-separated globs
+   over file paths or `file:qualified.name`) limits which definitions it may lock, edit
+   or change in a push.
+6. **Keys end.** They expire, a person can revoke any key on the Access page, an
+   orchestrator can revoke the worker keys (`hs key revoke <id>`), and revoking an
+   orchestrator key stops every key it issued.
+
+Keys are `hsk_<id>_<secret>`. The hub stores only a hash of the secret and compares it
+in constant time. Passwords are salted and stretched (200,000 rounds of BLAKE3).
+Secrets come from the operating system's secure generator. The client sends the key
+as the `X-HS-Key` header on every hub call: `HS_WORK_KEY`, else `HS_ORCH_KEY`.
+`hs key` commands meant for the orchestrator prefer `HS_ORCH_KEY`.
+
+Limits, stated plainly. Keys protect a project on a hub. A project without a hub has
+no referee: every agent on the machine can write its `.hs` folder. A key is a bearer
+secret, so an agent that can read another agent's environment can use its key, and
+scopes and short lifetimes are what limit the damage. A later step can bind
+orchestrator keys to a key pair (challenge and signature) so a copied secret alone is
+not enough.
 
 ## 7. Diffs and merges
 
@@ -368,7 +417,7 @@ when the two sides have diverged.
 
 ### Hub storage and scale
 
-`hshub` is written against two interfaces, `HubBackend` (projects, jobs, MCP sessions)
+`hshub` is written against two interfaces, `HubBackend` (projects, jobs, sessions, access)
 and `ProjectStore` (objects, refs, coordination, verification records, reviews, push
 log), in `src/hub/backend.h`.
 The first backend keeps one SQLite store per project, which suits one machine or a
@@ -379,7 +428,8 @@ small team. The interfaces are shaped for the way GitHub and similar hosts scale
 | objects (immutable, content-addressed) | SQLite per project | object store sharded by hash prefix (S3/GCS/Ceph, or a cluster of storage nodes like GitHub's Spokes); safe to cache and replicate anywhere because a hash never changes meaning |
 | refs (branch heads) | SQLite | Postgres or another transactional database; a push is one compare-and-swap row update |
 | coordination (locks, work items, requests, events) | SQLite | Postgres (the statements are portable), events optionally mirrored to a broker |
-| MCP sessions | `hub.db` | Postgres or Redis |
+| MCP and sign-in sessions | `hub.db` | Postgres or Redis |
+| people, access keys (hashes), settings | `hub.db` | Postgres |
 | index and graphs | rebuilt per project | derived data: rebuilt by workers from the objects, then served from replicas or a search cluster |
 | jobs (publish, verify) | `hub.db` queue | a real queue (Postgres `SKIP LOCKED`, SQS, Redis streams) feeding worker pools |
 
@@ -452,6 +502,10 @@ hs request accept|decline|cancel <id> / hs requests
 hs commit ... --resolves <ids>   commit that makes requested changes
 hs inbox [--wait S] [--follow]   events: requests, answers, granted locks, done
 hs subscribe <url> / unsubscribe webhook delivery of your events
+hs key [whoami]                  the access key you present (HS_WORK_KEY / HS_ORCH_KEY)
+hs key issue <work> --title ... [--scope globs] [--hours N] [--out file]
+                                 orchestrator: a worker key for one work item
+hs key list / hs key revoke <id> orchestrator: the project's keys
 hs graph callers|callees|reach|impact|path|unused|cycles|entry
 hs render [--out dir] [--at ref] generate source files
 hs mcp [--channel]               MCP server over stdio; --channel pushes events
@@ -474,7 +528,12 @@ hshub serve --root <dir> [--port 7420] [--token T] [--review-token R] [--cache d
 hshub create <project> --root <dir>
 hshub list --root <dir>
 hshub publish <project> --root <dir> [--branch b]
+hshub user add <name> --root <dir> [--password p]   someone who can sign in to the pages
+hshub key orchestrator <project> --root <dir> [--days 30] [--label l]
 ```
+
+The pages at `/ui/p/<project>/access` list a project's keys, create orchestrator
+keys, revoke keys, and switch key protection on or off.
 
 ## 10. MCP tools
 
@@ -483,7 +542,7 @@ The same tool set is served by `hs mcp` (stdio, local project) and by `hshub`
 
 `hs_status`, `hs_find`, `hs_list`, `hs_view`, `hs_context`, `hs_graph`, `hs_lock`,
 `hs_unlock`, `hs_locks`, `hs_work`, `hs_request`, `hs_requests`,
-`hs_request_respond`, `hs_inbox`, `hs_edit_def`, `hs_add_def`, `hs_delete_def`, `hs_tests`,
+`hs_request_respond`, `hs_inbox`, `hs_use_key`, `hs_edit_def`, `hs_add_def`, `hs_delete_def`, `hs_tests`,
 `hs_link_tests`, `hs_unlink_tests`, `hs_missing_tests`, `hs_note`, `hs_why`, `hs_diff`,
 `hs_verify`, `hs_commit`, `hs_show`, `hs_review`, `hs_reviews`, `hs_test_summary`,
 `hs_log`, `hs_history`, `hs_rollback`, `hs_render`, `hs_remotes`, `hs_pull`,
@@ -493,7 +552,9 @@ Coming with later milestones: `hs_fragment`, `hs_merge`.
 An agent with only the local MCP server can therefore do the whole cycle: edit,
 verify, commit, push and pull. The hub's MCP endpoint (`POST /mcp/<project>`,
 session in the `Mcp-Session-Id` header) serves the same tools against the hosted
-copy, for agents that work without a local store.
+copy, for agents that work without a local store. On a project with access keys, only
+the reading tools work without an `X-HS-Key` header, and a worker key's scope is
+checked against the `name`, `names` and `file` arguments.
 
 Edits through MCP require a `reason`, which becomes the definition's change context.
 Responses carry warnings for definitions over the review size limit and for
@@ -514,10 +575,11 @@ src/ops/       import, render, edit/update, diff, merge, locks, graph, sync, rev
                coordination (work items, requests, events) and work (their operations)
 src/mcp/       MCP protocol and tool definitions
 src/cli/       hs
-src/hub/       hub service, storage interfaces, SQLite backend, workspaces
+src/hub/       hub service, storage interfaces, SQLite backend, workspaces, access keys
 src/server/    hshub (HTTP server, job worker)
-src/web/       review pages (served by hs ui and hshub)
-tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub.sh, live_python.sh
+src/web/       review pages (served by hs ui and hshub), sign-in and access pages (hshub)
+tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub.sh, live_python.sh,
+               live_access.sh
 ```
 
 ## 12. Milestones

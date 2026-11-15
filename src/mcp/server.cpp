@@ -182,6 +182,11 @@ json McpServer::tool_list() {
             {"action", {{"type", "string"}, {"enum", {"accept", "decline", "cancel"}}}},
             {"reason", prop("string", "Why (needed to decline)")}},
            {"id", "action"}),
+      tool("hs_use_key",
+           "Present the access key your orchestrator gave you for your work item. On a project with keys, "
+           "locking, editing, requests and pushing need it. You then act as that work item, so you carry on "
+           "with its locks and requests even if another agent started the work.",
+           {{"key", prop("string", "The key, hsk_...")}}, {"key"}),
       tool("hs_inbox",
            "Your events since you last looked: requests on what you hold, answers to yours, locks handed "
            "to you, requests done (pull to get the change). wait: seconds to wait for one.",
@@ -351,6 +356,19 @@ json McpServer::call_tool(const std::string& t, const json& a) {
     j["summary"] = describe_request(q);
     if (action == "accept") j["next"] = "make the change, hs_verify, then hs_commit with resolves [" + std::to_string(id) + "]";
     return j;
+  }
+  if (t == "hs_use_key") {
+    std::string before = access_key();
+    set_access_key(need_str(a, "key"));
+    try {
+      json who = apply_access_key(r);
+      if (who.value("role", "").empty()) throw std::runtime_error("this project has no hub, so keys don't apply");
+      return {{"role", who.value("role", "")}, {"work", who.value("work", "")}, {"scope", who.value("scope", "")},
+              {"valid_until", format_time(who.value("expires", 0LL))}, {"agent", r.agent()}};
+    } catch (...) {
+      set_access_key(before);
+      throw;
+    }
   }
   if (t == "hs_inbox") {
     json out = json::array();
@@ -534,7 +552,7 @@ json McpServer::handle(const json& msg) {
   if (method == "initialize") {
     // Each MCP client session acts as its own agent unless HS_AGENT is set.
     const char* env = std::getenv("HS_AGENT");
-    if (!(env && *env)) {
+    if (!(env && *env) && access_key().empty()) {  // a worker key names the agent itself
       std::string client = msg.value("/params/clientInfo/name"_json_pointer, std::string("agent"));
       repo_.set_agent(client + "-" + new_uuid().substr(0, 6));
     }

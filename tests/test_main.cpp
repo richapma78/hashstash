@@ -15,6 +15,7 @@
 #include "ops/context.h"
 #include "ops/edit.h"
 #include "hub/backend.h"
+#include "hub/access.h"
 #include "hub/service.h"
 #include "hub/workspace.h"
 #include "mcp/server.h"
@@ -296,7 +297,10 @@ struct InProcessHub : HubTransport {
   HubService& svc;
   std::string project;
   InProcessHub(HubService& s, std::string p) : svc(s), project(std::move(p)) {}
-  nlohmann::json call(const std::string& op, const nlohmann::json& req) override { return svc.handle(project, op, req); }
+  // Sends the process's access key, as the HTTP transport does.
+  nlohmann::json call(const std::string& op, const nlohmann::json& req) override {
+    return svc.handle(project, op, req, access_key());
+  }
 };
 
 TEST(hub_sync) {
@@ -741,6 +745,110 @@ TEST(hub_cached_workspace) {
     CHECK(svc.run_jobs() == 1);
     CHECK(fs::exists(git_out / "calc" / "ops.py") &&
           read_file(git_out / "calc" / "ops.py").find("def neg(a):") != std::string::npos);
+    set_lock_transport_override(nullptr);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// People sign in and make an orchestrator key; the orchestrator issues worker
+// keys; on a project with keys, changes need one, a worker acts as its work
+// item inside its scope, and a fresh agent with a new key carries on.
+TEST(access_keys) {
+  fs::path dir = temp_dir("access");
+  {
+    auto backend = make_sqlite_backend(to_generic(dir / "hub"));
+    HubService svc(*backend);
+    svc.handle("demo", "create", {});
+    InProcessHub hub(svc, "demo");
+    set_lock_transport_override(&hub);
+    Access& acc = svc.access();
+
+    // An agent imports before the project has keys.
+    auto a = Repo::init(dir / "a", "demo");
+    a->set_agent("agent-a");
+    set_remote(*a, "origin", "http://unused/demo");
+    import_path(*a, fs::path(HS_FIXTURES) / "sample_project");
+    commit(*a, "import");
+    mark_verified(*a);
+    push(*a, hub);
+
+    // A person signs in (accounts come from the hub machine) and makes an orchestrator key.
+    CHECK(!acc.has_users());
+    CHECK(throws([&] { acc.add_user("rich", "short"); }));
+    acc.add_user("rich", "correct horse battery");
+    CHECK(throws([&] { acc.sign_in("rich", "wrong password!"); }));
+    CHECK(throws([&] { acc.sign_in("nobody", "correct horse battery"); }));
+    std::string session = acc.sign_in("rich", "correct horse battery");
+    CHECK(acc.session_user(session).value_or("") == "rich");
+    CHECK(!acc.session_user("forged").has_value());
+    CHECK(throws([&] { acc.issue_orchestrator("demo", "", 30, ""); }));
+    auto orch = acc.issue_orchestrator("demo", "rich", 30, "ork-1");
+    CHECK(starts_with(orch.text, "hsk_") && acc.required("demo"));
+    CHECK(backend->keys("demo")[0].dump().find(orch.text.substr(orch.text.rfind('_') + 1)) == std::string::npos);  // only a hash is kept
+    acc.sign_out(session);
+    CHECK(!acc.session_user(session).has_value());
+
+    // Without a key, reading works but changing doesn't.
+    IndexRow mul = resolve_name(*a, "mul");
+    CHECK(throws([&] { acquire_lock(*a, mul.lineage, mul.qname); }));
+    CHECK(svc.handle("demo", "refs", {})["branches"].contains("main"));
+    CHECK(throws([&] { svc.handle("demo", "issue_key", {{"work", "FEAT-1"}, {"title", "x"}}, "hsk_bogus_123"); }));
+
+    // The orchestrator issues a worker key for FEAT-1, limited to calc/ops.py.
+    json issued = svc.handle("demo", "issue_key",
+                             {{"work", "FEAT-1"}, {"title", "faster arithmetic"}, {"scope", "calc/ops.py"}, {"hours", 8}},
+                             orch.text);
+    std::string wkey = issued["text"];
+    CHECK(svc.handle("demo", "whoami", {}, wkey)["work"] == "FEAT-1");
+    CHECK(throws([&] { svc.handle("demo", "issue_key", {{"work", "FEAT-2"}, {"title", "y"}}, wkey); }));  // workers can't
+
+    // A worker presenting the key acts as FEAT-1, whatever its own name.
+    set_access_key(wkey);
+    auto w1 = Repo::init(dir / "w1", "demo");
+    w1->set_agent("claude-7f3a");
+    set_remote(*w1, "origin", "http://unused/demo");
+    pull(*w1, hub);
+    apply_access_key(*w1);
+    CHECK(w1->agent() == "FEAT-1" && current_work_id(*w1) == "FEAT-1");
+    acquire_lock(*w1, mul.lineage, mul.qname);
+    CHECK(has_lock(svc.handle("demo", "locks", {})["locks"], mul.lineage, "FEAT-1", "FEAT-1"));
+    IndexRow tst = resolve_name(*w1, "tests/test_ops.py:test_mul");
+    CHECK(throws([&] { acquire_lock(*w1, tst.lineage, tst.qname); }));  // outside the key's scope
+    // A forged identity in the request is replaced by the key's.
+    svc.handle("demo", "unlock", {{"target", mul.lineage}, {"agent", "someone-else"}, {"force", true}}, wkey);
+    CHECK(svc.handle("demo", "locks", {})["locks"].empty());
+    acquire_lock(*w1, mul.lineage, mul.qname);
+
+    // The agent is replaced (fresh context, new clone). The orchestrator gives
+    // the new one a key for the same work item: it carries on with the lock.
+    json issued2 = svc.handle("demo", "issue_key", {{"work", "FEAT-1"}, {"scope", "calc/**"}}, orch.text);
+    set_access_key(issued2["text"]);
+    auto w2 = Repo::init(dir / "w2", "demo");
+    set_remote(*w2, "origin", "http://unused/demo");
+    pull(*w2, hub);
+    apply_access_key(*w2);
+    CHECK(w2->agent() == "FEAT-1");
+    CHECK(!blocking_lock(*w2, mul.lineage));  // FEAT-1's lock is its own
+    Namespace ns = w2->work_ns();
+    auto e = replace_def(*w2, ns, mul.qname, "def mul(a, b):\n    return a * b\n", "", "simpler");
+    CHECK(e.ok);
+    commit_edits(*w2, ns, {&e});
+    commit_work(*w2, "simpler mul");
+    mark_verified(*w2);
+    push(*w2, hub);
+    CHECK(svc.handle("demo", "locks", {})["locks"].empty());
+
+    // An expired key stops working; revoking the orchestrator key stops its workers.
+    json k = backend->key(issued["key"]["id"].get<std::string>());
+    k["expires"] = 1;
+    backend->put_key(k);
+    CHECK(throws([&] { svc.handle("demo", "whoami", {}, wkey); }));
+    CHECK(svc.handle("demo", "whoami", {}, issued2["text"].get<std::string>())["role"] == "worker");
+    acc.revoke("demo", orch.key.id, "rich", nullptr);
+    CHECK(throws([&] { svc.handle("demo", "whoami", {}, issued2["text"].get<std::string>()); }));
+    CHECK(Access::in_scope("calc/**,docs/*", "calc/sub/x.py:f") && !Access::in_scope("calc/*.py", "tests/t.py:f"));
+    set_access_key("");
     set_lock_transport_override(nullptr);
   }
   std::error_code ec;

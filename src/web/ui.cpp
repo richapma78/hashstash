@@ -137,12 +137,14 @@ pre.code{font:13px/1.45 var(--mono);background:var(--card);border:1px solid var(
 .flash{padding:8px 12px;border-radius:8px;margin:8px 0}
 )CSS";
 
+bool g_access_nav = false;
+
 std::string page(const std::string& title, const std::string& project, const std::string& body) {
   std::string nav;
   if (!project.empty()) {
     std::string base = "/ui/p/" + url_enc(project);
     nav = "<nav><a href=\"" + base + "\">Commits</a><a href=\"" + base + "/work\">Uncommitted</a><a href=\"" + base +
-          "/tests\">Tests</a></nav>";
+          "/tests\">Tests</a>" + (g_access_nav ? "<a href=\"" + base + "/access\">Access</a>" : std::string()) + "</nav>";
   }
   return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
          "<title>" + esc(title) + "</title><style>" + kCss + "</style></head><body><header><div class=\"in\"><b><a href=\"/ui\">hashstash</a>" +
@@ -504,6 +506,13 @@ std::string def_page(Repo& repo, const std::string& project, const std::string& 
 }
 
 }  // namespace
+
+std::string ui_page(const std::string& title, const std::string& project, const std::string& body) {
+  return page(title, project, body);
+}
+std::string html_esc(const std::string& s) { return esc(s); }
+std::string url_encode(const std::string& s) { return url_enc(s); }
+void ui_show_access_nav(bool on) { g_access_nav = on; }
 
 void mount_ui(httplib::Server& srv, const UiSite& site_in) {
   auto site = std::make_shared<UiSite>(site_in);

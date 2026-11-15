@@ -101,6 +101,14 @@ Locks and work items (many agents on one codebase)
                                       requests done (exit 3 when there is nothing)
   hs subscribe <url> | unsubscribe <url>   have the hub post your events to a webhook
 
+Access keys (a hub project with keys refuses changes without one)
+  hs key [whoami]                     which key you present (HS_WORK_KEY / HS_ORCH_KEY)
+  hs key issue <work item> --title "..." [--scope "src/**,docs/*"] [--hours 24] [--label l]
+                [--out file]          orchestrator: a key for one agent's work; it acts as
+                                      that work item (a fresh agent with a new key carries on)
+  hs key list | hs key revoke <id>    orchestrator: the project's keys
+  Orchestrator keys are made by a person on the hub's pages (Access), or hshub key orchestrator.
+
 Call graph
   hs graph callers|callees|reach|impact <name> [--depth N]
   hs graph path <from> <to>
@@ -136,7 +144,8 @@ struct Args {
 const std::vector<std::string> kValueOpts = {"--as", "--prefix", "--out", "--at", "--from", "--to",
                                              "-m", "-n", "--after", "--depth", "--kind", "--source", "--port",
                                              "--title", "--priority", "--link", "--need", "--test-file",
-                                             "--test-code", "--reason", "--resolves", "--wait"};
+                                             "--test-code", "--reason", "--resolves", "--wait", "--scope",
+                                             "--hours"};
 
 Args parse(int argc, char** argv) {
   Args a;
@@ -818,6 +827,78 @@ int cmd_subscribe(Repo& repo, const Args& a, bool on) {
   return 0;
 }
 
+std::unique_ptr<HubTransport> open_remote_or_override(Repo& repo) {
+  struct Borrowed : HubTransport {
+    HubTransport* t;
+    json call(const std::string& op, const json& req) override { return t->call(op, req); }
+  };
+  if (auto* t = lock_transport_override()) {
+    auto b = std::make_unique<Borrowed>();
+    b->t = t;
+    return b;
+  }
+  return open_remote(repo, "origin");
+}
+
+int cmd_key(Repo& repo, const Args& a) {
+  std::string sub = a.pos.size() > 1 ? a.pos[1] : "whoami";
+  // Orchestrator commands present the orchestrator key when there is one, even
+  // if this shell also holds a worker key.
+  if (sub != "whoami")
+    if (const char* k = std::getenv("HS_ORCH_KEY"); k && *k) set_access_key(k);
+  auto hub = open_remote_or_override(repo);
+  if (sub == "whoami") {
+    json who = hub->call("whoami", json::object());
+    if (g_json) return out_json(who), 0;
+    if (who.value("role", "").empty()) std::cout << "No access key (set HS_WORK_KEY, or HS_ORCH_KEY for an orchestrator).\n";
+    else
+      std::cout << who.value("role", "") << " key " << who.value("key", "")
+                << (who.value("work", "").empty() ? "" : " for " + who.value("work", ""))
+                << (who.value("scope", "").empty() ? "" : ", scope " + who.value("scope", "")) << ", valid until "
+                << format_time(who.value("expires", 0LL)) << "\n";
+    return 0;
+  }
+  if (sub == "issue") {
+    need(a, 3, "key issue <work item> [--title \"...\"] [--kind k] [--priority n] [--scope globs] [--hours 24] [--label l] [--out file]");
+    json req = {{"work", a.pos[2]}, {"title", a.get("--title")}, {"kind", a.get("--kind")}, {"scope", a.get("--scope")},
+                {"hours", std::stoi(a.get("--hours", "24"))}, {"label", a.get("--label")}};
+    if (a.has("--priority")) req["priority"] = std::stoi(a.get("--priority"));
+    json r = hub->call("issue_key", req);
+    std::string text = r.value("text", "");
+    if (a.has("--out")) {
+      write_file(from_utf8(a.get("--out")), "HS_WORK_KEY=" + text + "\n");
+      std::cout << "Worker key " << r["key"].value("id", "") << " for " << a.pos[2] << " written to " << a.get("--out")
+                << " (valid until " << format_time(r["key"].value("expires", 0LL)) << ").\n";
+    } else if (g_json) {
+      out_json(r);
+    } else {
+      std::cout << text << "\n";
+      std::cerr << "Worker key for " << a.pos[2] << ", valid until " << format_time(r["key"].value("expires", 0LL))
+                << " (shown once). Give it to the agent as HS_WORK_KEY.\n";
+    }
+    return 0;
+  }
+  if (sub == "list") {
+    json r = hub->call("keys", json::object());
+    if (g_json) return out_json(r), 0;
+    long long now = now_seconds();
+    for (auto& k : r["keys"]) {
+      std::string state = k.value("revoked", 0LL) ? "revoked" : k.value("expires", 0LL) <= now ? "expired" : "active";
+      std::cout << k.value("id", "") << "  " << k.value("role", "") << "  " << k.value("work", "") << "  "
+                << k.value("scope", "") << "  " << k.value("label", "") << "  until "
+                << format_time(k.value("expires", 0LL)) << "  " << state << "\n";
+    }
+    return 0;
+  }
+  if (sub == "revoke") {
+    need(a, 3, "key revoke <id>");
+    hub->call("revoke_key", {{"id", a.pos[2]}});
+    std::cout << "Revoked " << a.pos[2] << ".\n";
+    return 0;
+  }
+  throw std::runtime_error("usage: hs key [whoami] | issue <work item> ... | list | revoke <id>");
+}
+
 int cmd_remote(Repo& repo, const Args& a) {
   if (a.pos.size() >= 4 && a.pos[1] == "add") {
     set_remote(repo, a.pos[2], a.pos[3]);
@@ -1089,6 +1170,15 @@ int main(int argc, char** argv) {
     if (cmd == "clone") return cmd_clone(a);
     auto repo = Repo::open(fs::current_path());
     if (a.has("--as")) repo->set_agent(a.get("--as"));
+    // A worker key makes this agent its work item (see hub/access.h).
+    if (!access_key().empty() && cmd != "key") {
+      try {
+        apply_access_key(*repo);
+      } catch (std::exception& e) {
+        std::cerr << "hs: access key not accepted: " << e.what() << "\n";
+        return 1;
+      }
+    }
     if (cmd == "import") return cmd_import(*repo, a);
     if (cmd == "render") return cmd_render(*repo, a);
     if (cmd == "status") return cmd_status(*repo, a);
@@ -1109,6 +1199,7 @@ int main(int argc, char** argv) {
     if (cmd == "tests") return cmd_tests(*repo, a);
     if (cmd == "note") return cmd_note(*repo, a);
     if (cmd == "why") return cmd_why(*repo, a);
+    if (cmd == "key") return cmd_key(*repo, a);
     if (cmd == "work") return cmd_work(*repo, a);
     if (cmd == "request") return cmd_request(*repo, a);
     if (cmd == "requests") return cmd_requests(*repo, a);
@@ -1133,7 +1224,7 @@ int main(int argc, char** argv) {
       _setmode(_fileno(stdin), _O_BINARY);
 #endif
       std::ios::sync_with_stdio(false);
-      McpServer server(*repo);
+      McpServer server(*repo);  // (a worker key in HS_WORK_KEY already named the agent above)
       server.enable_channel(a.has("--channel"));
       server.serve(std::cin, std::cout);
       return 0;
