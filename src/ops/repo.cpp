@@ -42,6 +42,7 @@ minutes = 15      # a lock expires unless renewed within this time
 require = "warn"  # every function/method needs linked test cases: off | warn | block
 # exempt = ["__repr__", "_*"]   # short names that need no tests
 python = "python -m pytest -q {tests}"   # how hs verify runs Python tests
+impact_depth = 3  # verify also runs the tests of callers up to this many levels away (0 = off)
 
 [history]
 keep = 500        # lifecycle steps kept per branch for rollback (0 = keep all)
@@ -124,6 +125,7 @@ void Repo::load_config() {
     else if (key == "locks.minutes") num(config_.lock_minutes);
     else if (key == "tests.require") config_.tests_require = unquote(val);
     else if (key == "tests.python") config_.test_command_python = unquote(val);
+    else if (key == "tests.impact_depth") num(config_.tests_impact_depth);
     else if (key == "history.keep") num(config_.history_keep);
     else if (key == "publish.git_dir") config_.publish_git_dir = unquote(val);
     else if (key == "publish.remote") config_.publish_remote = unquote(val);

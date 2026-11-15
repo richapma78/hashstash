@@ -481,10 +481,16 @@ int cmd_rollback(Repo& repo, const Args& a) {
 int cmd_verify(Repo& repo, const Args& a) {
   json r = verify(repo, a.has("--all"));
   if (g_json) return out_json(r), r["status"] == "passed" ? 0 : 1;
+  if (!r["impacted"].empty()) {
+    std::cout << "  also testing callers:";
+    for (auto& n : r["impacted"]) std::cout << " " << n.get<std::string>();
+    std::cout << "\n";
+  }
   for (auto& t : r["tests_run"]) std::cout << (t["status"] == "passed" ? "  pass  " : "  FAIL  ") << t["test"].get<std::string>() << "\n";
   for (auto& w : r["warnings"]) std::cout << "  warning: " << w["name"].get<std::string>() << ": " << w["problem"].get<std::string>() << "\n";
   for (auto& f : r["failures"]) std::cout << "  failure: " << f["name"].get<std::string>() << ": " << f["problem"].get<std::string>() << "\n";
-  std::cout << "Verification " << r["status"].get<std::string>() << " (" << r["tests_run"].size() << " tests run).\n";
+  size_t n = r["tests_run"].size();
+  std::cout << "Verification " << r["status"].get<std::string>() << " (" << n << (n == 1 ? " test" : " tests") << " run).\n";
   return r["status"] == "passed" ? 0 : 1;
 }
 

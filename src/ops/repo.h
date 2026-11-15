@@ -25,6 +25,7 @@ struct Config {
   std::string tests_require = "warn";      // off | warn | block
   std::vector<std::string> tests_exempt;   // short-name globs that need no tests
   std::string test_command_python = "python -m pytest -q {tests}";
+  int tests_impact_depth = 3;              // verify also runs tests of callers this deep (0 = off)
   int history_keep = 500;                  // lifecycle entries kept per branch (0 = all)
   // [publish]: render into a git working copy, commit and push.
   std::string publish_git_dir;             // relative to the project root, or absolute

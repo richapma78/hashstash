@@ -1,6 +1,7 @@
 #include "ops/verify.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <set>
 
@@ -34,6 +35,33 @@ std::string pytest_node(const std::string& qname) {
   return out;
 }
 
+// The directory (relative to the rendered tree, "" for its top) that a Python
+// test file should be run from: the nearest folder with a pytest config, else
+// the folder above the package holding the test, stepping out of tests/.
+// "tests/fixtures/app/tests/test_x.py" -> "tests/fixtures/app".
+std::string python_root(const fs::path& tree, const std::string& file) {
+  std::vector<std::string> parts;
+  for (size_t i = 0, j; i <= file.size(); i = j + 1) {
+    j = file.find('/', i);
+    if (j == std::string::npos) j = file.size();
+    parts.push_back(file.substr(i, j - i));
+  }
+  parts.pop_back();  // the file name
+  auto rel = [&](size_t n) {
+    std::string r;
+    for (size_t k = 0; k < n; ++k) r += (k ? "/" : "") + parts[k];
+    return r;
+  };
+  auto dir = [&](size_t n) { return n ? tree / from_utf8(rel(n)) : tree; };
+  for (size_t n = parts.size() + 1; n-- > 0;)
+    for (const char* cfg : {"pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"})
+      if (fs::exists(dir(n) / cfg)) return rel(n);
+  size_t n = parts.size();
+  while (n > 0 && fs::exists(dir(n) / "__init__.py")) --n;
+  if (n > 0 && (parts[n - 1] == "tests" || parts[n - 1] == "test" || parts[n - 1] == "testing")) --n;
+  return rel(n);
+}
+
 std::string command_for(const Repo& repo, const std::string& lang, const std::vector<std::string>& nodes) {
   std::string tmpl = lang == "python" ? repo.config().test_command_python : "";
   if (tmpl.empty()) return "";
@@ -42,6 +70,21 @@ std::string command_for(const Repo& repo, const std::string& lang, const std::ve
   size_t at = tmpl.find("{tests}");
   if (at == std::string::npos) return tmpl + " " + list;
   return tmpl.replace(at, 7, list);
+}
+
+// What verify reviews against: the last state of this branch known to a hub
+// (pushed or pulled), so everything a push would send gets checked, whether or
+// not it is committed yet. Before the first push that is the empty namespace.
+Hash verify_base(Repo& repo) {
+  Store& s = repo.store();
+  std::string suffix = "/" + repo.branch();
+  for (auto& [name, value] : s.refs_with_prefix("remote/")) {
+    if (value.empty() || name.size() <= suffix.size() + 7) continue;
+    if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+    if (!s.has(value)) continue;
+    return load_commit(s, value).ns;
+  }
+  return empty_namespace(s);
 }
 
 }  // namespace
@@ -64,7 +107,7 @@ nlohmann::json verify(Repo& repo, bool all) {
   if (all) {
     targets = list_defs(repo, "");
   } else {
-    auto d = diff_namespaces(s, load_namespace(s, repo.head_ns_hash()), work);
+    auto d = diff_namespaces(s, load_namespace(s, verify_base(repo)), work);
     for (auto& c : d.defs)
       if (c.kind != "removed")
         if (auto r = row_by_qname(repo, c.new_name)) targets.push_back(*r);
@@ -92,43 +135,89 @@ nlohmann::json verify(Repo& repo, bool all) {
       warnings.push_back({{"name", t.qname}, {"problem", "long: " + std::to_string(lines) + " lines; consider splitting"}});
   }
 
-  // Tests to run: tests linked to the targets, plus targets that are tests.
+  // Tests to run: tests linked to the targets, targets that are tests, and the
+  // same for everything that calls a target (up to impact_depth levels), since
+  // a change to add() can break mul() which calls it.
   std::map<std::string, std::set<std::string>> suites_of_test;  // test -> suite hashes
   std::map<std::string, IndexRow> test_rows;
-  for (auto& t : targets) {
+  std::set<std::string> covered;
+  nlohmann::json impacted = nlohmann::json::array();
+  auto add_tests_of = [&](const IndexRow& t) {
+    if (!covered.insert(t.qname).second) return;
     if (is_test_def(t.file, t.qname)) {
       test_rows[t.qname] = t;
-      continue;
+      return;
     }
     auto it = work.tests.find(t.lineage);
-    if (it == work.tests.end()) continue;
+    if (it == work.tests.end()) return;
     Hash suite = suite_hash(repo, work, t.qname);
     for (auto& tid : it->second)
       for (auto& tr : rows_by_lineage(repo, tid)) {
         test_rows[tr.qname] = tr;
         suites_of_test[tr.qname].insert(suite);
       }
-  }
+  };
+  for (auto& t : targets) add_tests_of(t);
+  int depth = repo.config().tests_impact_depth;
+  if (depth > 0)
+    for (auto& t : targets) {
+      if (t.kind == "namespace" || is_test_def(t.file, t.qname)) continue;
+      nlohmann::json r = reach(repo, t.qname, depth, true);
+      for (auto& level : r["levels"])
+        for (auto& e : level) {
+          std::string caller = e["name"].get<std::string>();
+          if (covered.count(caller)) continue;
+          auto row = row_by_qname(repo, caller);
+          if (!row) continue;
+          if (!is_test_def(row->file, row->qname)) impacted.push_back(caller);
+          add_tests_of(*row);
+        }
+    }
+  report["impacted"] = impacted;
 
   nlohmann::json ran = nlohmann::json::array();
   if (!test_rows.empty()) {
     fs::path tree = repo.hs_dir() / "verify" / "tree";
     render_to(repo, tree, work_hash);
+    // Python trusts a cached .pyc when the source's size and mtime second match,
+    // so an edit like "a + b" -> "a - b" rendered within the same second would
+    // run the old code. Drop the caches and stop new ones being written.
+    std::vector<fs::path> caches;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(tree, ec); it != fs::recursive_directory_iterator(); it.increment(ec))
+      if (it->is_directory() && it->path().filename() == "__pycache__") {
+        caches.push_back(it->path());
+        it.disable_recursion_pending();
+      }
+    for (auto& c : caches) fs::remove_all(c, ec);
+#ifdef _WIN32
+    _putenv_s("PYTHONDONTWRITEBYTECODE", "1");
+#else
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+#endif
     // Batch per file; if a batch fails, run its tests one by one to attribute.
     std::map<std::string, std::vector<const IndexRow*>> by_file;
     for (auto& [q, r] : test_rows) by_file[r.file].push_back(&r);
     for (auto& [file, rows] : by_file) {
+      // Run from the test file's own project root so its imports resolve,
+      // with node ids relative to that root.
+      std::string root = rows[0]->lang == "python" ? python_root(tree, file) : "";
+      fs::path dir = root.empty() ? tree : tree / from_utf8(root);
+      auto node_of = [&](const IndexRow* r) {
+        std::string n = pytest_node(r->qname);
+        return root.empty() ? n : n.substr(root.size() + 1);
+      };
       std::vector<std::string> nodes;
-      for (auto* r : rows) nodes.push_back(pytest_node(r->qname));
+      for (auto* r : rows) nodes.push_back(node_of(r));
       std::string cmd = command_for(repo, rows[0]->lang, nodes);
       if (cmd.empty()) {
         warnings.push_back({{"name", file}, {"problem", "no test command for " + rows[0]->lang}});
         continue;
       }
-      RunResult batch = run_in(tree, cmd);
+      RunResult batch = run_in(dir, cmd);
       for (auto* r : rows) {
         RunResult one = batch;
-        if (batch.code != 0 && rows.size() > 1) one = run_in(tree, command_for(repo, r->lang, {pytest_node(r->qname)}));
+        if (batch.code != 0 && rows.size() > 1) one = run_in(dir, command_for(repo, r->lang, {node_of(r)}));
         std::string status = one.code == 0 ? "passed" : "failed";
         nlohmann::json j = {{"test", r->qname}, {"status", status}};
         if (one.code != 0) {

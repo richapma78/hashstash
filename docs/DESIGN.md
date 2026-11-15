@@ -9,6 +9,10 @@ build, to run, or to push to GitHub.
 
 It is language-agnostic. Python comes first, then C and C++.
 
+For a visual overview open [`docs/index.html`](index.html). For step-by-step use by
+hand (build, edit, test, hub, publish, agents), open [`docs/guide.html`](guide.html).
+This file is the technical design.
+
 ## 1. Programs
 
 | Program  | Side   | Role |
@@ -149,9 +153,22 @@ several definitions (a test may build whatever higher-level objects it needs).
 ## 5b. Verification and the push gate
 
 `hs verify` checks the policy (tests linked, size limits) for every definition
-changed since the last commit, generates the source tree, runs the linked tests
-(`[tests] python = "python -m pytest -q {tests}"`), and records the result against the
-namespace hash. Commits are local; **a push only accepts verified commits.**
+the hub has not seen yet, meaning changes since the branch's last pushed or pulled
+commit (everything, before the first push). It then generates the source tree, runs
+the linked tests (`[tests] python = "python -m pytest -q {tests}"`), and records the
+result against the namespace hash. Commits are local; **a push only accepts verified
+commits.**
+
+* **Impact testing.** Verify also follows the call graph upwards and runs the tests
+  of every caller up to `[tests] impact_depth` levels (default 3), so changing
+  `add` also runs the tests of `mul`, which calls it.
+* **Where tests run.** Each Python test file runs from its own project root: the
+  nearest folder with `pytest.ini`, `pyproject.toml`, `setup.cfg` or `tox.ini`, else
+  the folder above its package and any `tests/` folder. Nested projects (such as
+  fixtures) therefore import correctly.
+* **Fresh code.** Bytecode caches in the generated tree are removed and
+  `PYTHONDONTWRITEBYTECODE` is set. Python only notices a stale `.pyc` when a file's
+  size or modification second changes, which a quick one-character edit may not do.
 
 ## 5c. Lifecycle history and rollback
 

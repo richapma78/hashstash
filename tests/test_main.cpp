@@ -21,6 +21,7 @@
 #include "ops/sync.h"
 #include "ops/query.h"
 #include "ops/tests.h"
+#include "ops/verify.h"
 #include "ops/import_render.h"
 #include "ops/repo.h"
 
@@ -233,6 +234,45 @@ TEST(edit_keeps_identity) {
   fs::remove_all(dir);
 }
 
+// Verify after commit must still run the tests linked to what a push would send,
+// and a failing test must fail verification. Needs python with pytest.
+TEST(verify_runs_python_tests) {
+  if (run_command(fs::current_path(), "python -m pytest --version").code != 0) {
+    std::cerr << "  (skipped: python -m pytest not available)\n";
+    return;
+  }
+  fs::path dir = temp_dir("verify");
+  {
+    auto repo = Repo::init(dir, "t");
+    import_path(*repo, fs::path(HS_FIXTURES) / "sample_project");
+    autolink_tests(*repo);
+    commit(*repo, "import");
+    auto r = verify(*repo, false);
+    CHECK(r["status"] == "passed");
+    CHECK(r["tests_run"].size() == 4);
+    // As if pushed: later verifies review only what the hub has not seen.
+    repo->store().set_ref("remote/origin/main", *repo->head_commit());
+
+    // Break add. Its own tests fail, and so does mul's test, because mul calls
+    // add: verify follows callers through the graph.
+    Namespace ns = repo->work_ns();
+    IndexRow add = resolve_name(*repo, "calc/ops.py:add");
+    auto o = replace_def(*repo, ns, add.qname, "def add(a, b):\n    return a - b\n", short_hash(add.hash), "break");
+    CHECK(o.ok);
+    commit_edits(*repo, ns, {&o});
+    commit(*repo, "break add");
+    auto bad = verify(*repo, false);
+    if (bad["status"] != "failed") std::cerr << bad.dump(2) << "\n";
+    CHECK(bad["status"] == "failed");
+    bool mul_failed = false;
+    for (auto& t : bad["tests_run"])
+      if (t["test"] == "tests/test_ops.py:test_mul") mul_failed = t["status"] == "failed";
+    CHECK(mul_failed);
+    CHECK(bad["impacted"].size() == 1 && bad["impacted"][0] == "calc/ops.py:mul");
+  }
+  fs::remove_all(dir);
+}
+
 // Calls the hub service directly, as the HTTP server would.
 struct InProcessHub : HubTransport {
   HubService& svc;
@@ -301,7 +341,6 @@ TEST(hub_sync) {
     commit(*a, "simpler mul");
     a->store().exec("INSERT OR IGNORE INTO verification(ns, status, time, agent, report) "
                     "SELECT value, 'passed', 0, 'test', '{}' FROM ref WHERE name = 'work/main'");
-    std::cerr << "push2\n";
     push(*a, hub);
     auto pl2 = pull(*b, hub);
     CHECK(starts_with(pl2["result"].get<std::string>(), "fast-forward"));
@@ -321,7 +360,6 @@ TEST(hub_sync) {
     for (auto* r : {a.get(), b.get()})
       r->store().exec("INSERT OR IGNORE INTO verification(ns, status, time, agent, report) "
                       "SELECT value, 'passed', 0, 'test', '{}' FROM ref WHERE name = 'work/main'");
-    std::cerr << "push3\n";
     push(*a, hub);
     bool stale = false;
     try {
