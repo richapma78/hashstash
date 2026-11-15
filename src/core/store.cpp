@@ -170,6 +170,44 @@ CREATE TABLE IF NOT EXISTS render_manifest (
   hash TEXT NOT NULL,
   PRIMARY KEY (out_dir, path)
 ) WITHOUT ROWID;
+
+-- Reviews of commits by people and AI agents. Append-only; synced with the
+-- hub by id (rowid orders them on the hub for incremental pulls).
+CREATE TABLE IF NOT EXISTS review (
+  id TEXT PRIMARY KEY,
+  commit_hash TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  kind TEXT NOT NULL,        -- human | ai
+  verdict TEXT NOT NULL,     -- approved | changes_requested | comment
+  summary TEXT NOT NULL,
+  comments TEXT NOT NULL,    -- JSON [{name, line, text}]
+  time INTEGER NOT NULL,
+  synced INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS review_commit ON review(commit_hash);
+
+-- The review flag per commit, kept current as reviews arrive:
+-- level = unreviewed | ai (only AI reviewed) | human (a person reviewed too).
+CREATE TABLE IF NOT EXISTS commit_review (
+  commit_hash TEXT PRIMARY KEY,
+  level TEXT NOT NULL,
+  ai_reviewed INTEGER NOT NULL,
+  human_reviewed INTEGER NOT NULL,
+  human_approved INTEGER NOT NULL,
+  ai_verdict TEXT NOT NULL,     -- latest AI verdict, or ''
+  human_verdict TEXT NOT NULL,  -- latest human verdict, or ''
+  updated INTEGER NOT NULL
+) WITHOUT ROWID;
+
+-- Pushes accepted (on a hub) or made (on a client).
+CREATE TABLE IF NOT EXISTS push_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  branch TEXT NOT NULL,
+  old_head TEXT NOT NULL,
+  new_head TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  time INTEGER NOT NULL
+);
 )SQL";
 
 Store::Store(const std::string& db_path) {

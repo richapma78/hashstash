@@ -15,10 +15,14 @@
 #include "ops/sync.h"
 #include "ops/query.h"
 #include "ops/repo.h"
+#include "ops/review.h"
 #include "ops/tests.h"
 #include "ops/verify.h"
 
 #include "mcp/server.h"
+#include "web/ui.h"
+
+#include <httplib.h>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -57,7 +61,12 @@ Review and history
   hs log [name] [-n N]
   hs history [-n N]                   lifecycle steps (import, update, commit, verify...)
   hs rollback @<id>                   restore a step's state (the latest stays in history)
-  hs verify [--all]                   check policy and run linked tests
+  hs verify [--all] [-v]              check policy and run linked tests (one line per function)
+  hs show [commit]                    a commit: per-function line diffs, test summary, reviews
+  hs review [commit] approve|changes|comment [-m text]
+                                      record your review (a person's, or an AI's under an agent)
+  hs reviews [-n N]                   review flags of recent commits
+  hs ui [--port 7421] [--no-open]     review pages in the browser for this project
 
 Tests (many per definition)
   hs tests <name>                     linked tests and suite hash
@@ -66,6 +75,7 @@ Tests (many per definition)
   hs tests suggest <name>             tests that call it
   hs tests autolink                   link suggested tests wherever none are linked
   hs tests missing                    definitions with no tests
+  hs tests summary [prefix] [--problems]  results per function: "18/20 passed, 2 failed"
 
 Notes and context
   hs note <name> <from>-<to> <text>   comment on a line region (kept beside the code)
@@ -107,7 +117,7 @@ struct Args {
 };
 
 const std::vector<std::string> kValueOpts = {"--as", "--prefix", "--out", "--at", "--from", "--to",
-                                             "-m", "-n", "--after", "--depth", "--kind", "--source"};
+                                             "-m", "-n", "--after", "--depth", "--kind", "--source", "--port"};
 
 Args parse(int argc, char** argv) {
   Args a;
@@ -404,6 +414,7 @@ int cmd_diff(Repo& repo, const Args& a) {
     d.files_added.clear();
     d.files_removed.clear();
     d.files_glue_changed.clear();
+    d.module_changes.clear();
     d.tests_changed = false;
   }
   bool text = !a.has("--stat");
@@ -486,7 +497,14 @@ int cmd_verify(Repo& repo, const Args& a) {
     for (auto& n : r["impacted"]) std::cout << " " << n.get<std::string>();
     std::cout << "\n";
   }
-  for (auto& t : r["tests_run"]) std::cout << (t["status"] == "passed" ? "  pass  " : "  FAIL  ") << t["test"].get<std::string>() << "\n";
+  // One line per function ("3/4 passed, 1 failed"); individual tests only when they fail.
+  for (auto& f : r["functions"]) {
+    std::string label = f["summary"];
+    label.resize(std::max<size_t>(label.size() + 2, 24), ' ');
+    std::cout << "  " << label << f["name"].get<std::string>() << "\n";
+  }
+  for (auto& t : r["tests_run"])
+    if (t["status"] != "passed" || a.has("-v")) std::cout << (t["status"] == "passed" ? "  pass  " : "  FAIL  ") << t["test"].get<std::string>() << "\n";
   for (auto& w : r["warnings"]) std::cout << "  warning: " << w["name"].get<std::string>() << ": " << w["problem"].get<std::string>() << "\n";
   for (auto& f : r["failures"]) std::cout << "  failure: " << f["name"].get<std::string>() << ": " << f["problem"].get<std::string>() << "\n";
   size_t n = r["tests_run"].size();
@@ -494,8 +512,16 @@ int cmd_verify(Repo& repo, const Args& a) {
   return r["status"] == "passed" ? 0 : 1;
 }
 
+int cmd_tests_summary(Repo& repo, const Args& a);
+
+std::string first_line_of(const json& msg) {
+  std::string m = msg.get<std::string>();
+  return m.substr(0, m.find('\n'));
+}
+
 int cmd_tests(Repo& repo, const Args& a) {
-  need(a, 2, "tests <name> | link | unlink | suggest | autolink | missing");
+  need(a, 2, "tests <name> | link | unlink | suggest | autolink | missing | summary");
+  if (a.pos[1] == "summary") return cmd_tests_summary(repo, a);
   const std::string& sub = a.pos[1];
   auto names = [&](size_t from) { return std::vector<std::string>(a.pos.begin() + from, a.pos.end()); };
   if (sub == "link" || sub == "unlink") {
@@ -527,6 +553,7 @@ int cmd_tests(Repo& repo, const Args& a) {
     if (g_json) return out_json(j), 0;
     std::cout << j["name"].get<std::string>() << "  #" << j["hash"].get<std::string>() << "  suite #"
               << j["suite_hash"].get<std::string>() << "\n";
+    if (j.contains("results")) std::cout << "  results on this code: " << j["results"]["summary"].get<std::string>() << "\n";
     for (auto& t : j["tests"]) std::cout << "  " << t["name"].get<std::string>() << "  #" << t["hash"].get<std::string>() << "\n";
     if (j["tests"].empty()) std::cout << "  no tests linked\n";
     if (j.contains("suggested"))
@@ -617,6 +644,13 @@ int cmd_push(Repo& repo, const Args& a) {
   else
     std::cout << "Pushed " << r["branch"].get<std::string>() << " #" << short_hash(r["head"]) << " to " << remote
               << " (" << r["uploaded"] << " objects uploaded).\n";
+  if (r.contains("commits") && r["commits"].get<int>() > 0) {
+    int n = r["commits"], human = r["human_reviewed"], ai = r["ai_reviewed_only"], none = r["unreviewed"];
+    std::cout << "Reviews: " << human << " of " << n << " commit(s) reviewed by a person";
+    if (ai) std::cout << ", " << ai << " by AI only";
+    if (none) std::cout << ", " << none << " unreviewed";
+    std::cout << " (approval is optional; hs ui to review).\n";
+  }
   return 0;
 }
 
@@ -704,6 +738,141 @@ int cmd_graph(Repo& repo, const Args& a) {
   return 0;
 }
 
+void print_show(const json& j) {
+  std::cout << "#" << j["short"].get<std::string>() << "  " << j["when"].get<std::string>() << "  "
+            << j["author"].get<std::string>() << "\n    " << j["message"].get<std::string>() << "\n";
+  std::cout << "    tests: " << j["verification"].get<std::string>() << "   review: " << j["review"]["label"].get<std::string>()
+            << "\n\n";
+  auto& d = j["diff"];
+  for (auto& f : d["files_added"]) std::cout << "  new file      " << f.get<std::string>() << "\n";
+  for (auto& f : d["files_removed"]) std::cout << "  deleted file  " << f.get<std::string>() << "\n";
+  auto body = [](const json& c) {
+    std::string t = c.contains("diff") ? c["diff"].get<std::string>() : "";
+    char mark = 0;
+    if (c.contains("text")) t = c["text"], mark = '+';
+    if (c.contains("removed_text")) t = c["removed_text"], mark = '-';
+    for (auto& l : split_lines(t)) std::cout << "      " << (mark ? std::string(1, mark) : "") << l;
+    if (!t.empty() && t.back() != '\n') std::cout << "\n";
+    if (c.contains("omitted_lines")) std::cout << "      (" << c["omitted_lines"] << " lines not shown)\n";
+  };
+  for (auto& c : d["definitions"]) {
+    std::string name = c.contains("new") ? c["new"].get<std::string>() : c["old"].get<std::string>();
+    std::string label = c["change"];
+    label.resize(std::max<size_t>(label.size(), 14), ' ');
+    std::cout << "  " << label << name;
+    if (j["tests"].contains(name)) std::cout << "   [" << j["tests"][name]["summary"].get<std::string>() << "]";
+    std::cout << "\n";
+    body(c);
+  }
+  if (d.contains("module_code"))
+    for (auto& m : d["module_code"]) {
+      std::cout << "  module code   " << m["file"].get<std::string>() << " (" << m["change"].get<std::string>() << ")\n";
+      body(m);
+    }
+  if (d.contains("truncated")) std::cout << "  " << d["truncated"].get<std::string>() << "\n";
+  if (!j["reviews"].empty()) {
+    std::cout << "\nReviews:\n";
+    for (auto& r : j["reviews"]) {
+      std::cout << "  " << (r["kind"] == "human" ? "person " : "AI     ") << r["reviewer"].get<std::string>() << ": "
+                << r["verdict"].get<std::string>();
+      if (!r["summary"].get<std::string>().empty()) std::cout << " - " << r["summary"].get<std::string>();
+      std::cout << "\n";
+    }
+  }
+}
+
+int cmd_show(Repo& repo, const Args& a) {
+  json j = show_commit(repo, resolve_commit(repo, a.pos.size() > 1 ? a.pos[1] : "head"), 0);
+  if (g_json) return out_json(j), 0;
+  print_show(j);
+  return 0;
+}
+
+int cmd_review(Repo& repo, const Args& a) {
+  need(a, 2, "review [commit] approve|changes|comment [-m text]");
+  std::string commit = "head", verdict;
+  if (a.pos.size() > 2) commit = a.pos[1], verdict = a.pos[2];
+  else verdict = a.pos[1];
+  std::string kind = reviewer_kind_from_env();
+  Review r = add_review(repo, commit, verdict, a.get("-m"), kind);
+  std::string note = share_reviews(repo);
+  auto st = review_status(repo.store(), r.commit);
+  if (g_json) return out_json({{"recorded", review_to_json(r)}, {"flag", st.to_json()}, {"note", note}}), 0;
+  std::cout << "Recorded " << (kind == "human" ? "your" : "an AI") << " review of #" << short_hash(r.commit) << ": "
+            << r.verdict << ". Commit is now " << st.label() << ".\n";
+  if (kind == "ai") std::cout << "(Running under an AI agent, so it counts as an AI review; HS_REVIEWER=human overrides.)\n";
+  if (!note.empty()) std::cout << note << "\n";
+  return 0;
+}
+
+int cmd_reviews(Repo& repo, const Args& a) {
+  auto commits = branch_commits(repo, repo.branch(), std::stoi(a.get("-n", "20")));
+  json out = json::array();
+  for (auto& h : commits) out.push_back(commit_row(repo, h));
+  if (g_json) return out_json(out), 0;
+  for (auto& r : out) {
+    std::string label = r["review"]["label"];
+    label.resize(std::max<size_t>(label.size(), 26), ' ');
+    std::cout << "#" << r["short"].get<std::string>() << "  " << label << first_line_of(r["message"]) << "\n";
+  }
+  if (out.empty()) std::cout << "No commits.\n";
+  return 0;
+}
+
+int cmd_ui(Repo& repo, const Args& a) {
+  int port = std::stoi(a.get("--port", "7421"));
+  std::string name = repo.config().project.empty() ? "project" : repo.config().project;
+  std::mutex mu;
+  httplib::Server srv;
+  UiSite site;
+  site.where = "local";
+  site.projects = [&] { return std::vector<std::string>{name}; };
+  site.open = [&](const std::string& p) -> Repo* { return p == name ? &repo : nullptr; };
+  site.mu = &mu;
+  mount_ui(srv, site);
+  srv.Get("/", [](const httplib::Request&, httplib::Response& res) { res.set_redirect("/ui"); });
+  std::string url = "http://127.0.0.1:" + std::to_string(port) + "/ui/p/" + name;
+  std::cout << "Review pages for " << name << ": " << url << "\n(Ctrl+C to stop)" << std::endl;
+#ifdef _WIN32
+  if (!a.has("--no-open")) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+  if (!srv.listen("127.0.0.1", port)) throw std::runtime_error("cannot listen on port " + std::to_string(port) + " (--port to pick another)");
+  return 0;
+}
+
+int cmd_tests_summary(Repo& repo, const Args& a) {
+  std::string prefix = a.pos.size() > 2 ? a.pos[2] : "";
+  bool problems = a.has("--problems");
+  std::vector<std::pair<int, TestSummary>> rows;
+  int funcs = 0, total = 0, passed = 0, failed = 0;
+  for (auto& [q, t] : test_summaries(repo, repo.work_ns())) {
+    if (!prefix.empty() && !starts_with(q, prefix)) continue;
+    if (t.total == 0 && !t.needs_tests) continue;
+    ++funcs, total += t.total, passed += t.passed, failed += t.failed;
+    if (problems && t.total > 0 && t.passed == t.total) continue;
+    rows.push_back({t.failed ? 0 : t.total == 0 ? 1 : t.not_run ? 2 : 3, t});
+  }
+  std::stable_sort(rows.begin(), rows.end(), [](auto& x, auto& y) { return x.first < y.first; });
+  if (g_json) {
+    json arr = json::array();
+    for (auto& [k, t] : rows) {
+      json j = t.to_json();
+      j["name"] = t.qname;
+      arr.push_back(j);
+    }
+    return out_json({{"functions", funcs}, {"tests", total}, {"passed", passed}, {"failed", failed}, {"rows", arr}}), 0;
+  }
+  for (auto& [k, t] : rows) {
+    std::string label = t.label();
+    label.resize(std::max<size_t>(label.size(), 28), ' ');
+    std::cout << "  " << label << t.qname << "\n";
+  }
+  std::cout << funcs << " functions, " << passed << "/" << total << " tests passed";
+  if (failed) std::cout << ", " << failed << " failed";
+  std::cout << ".\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -750,6 +919,10 @@ int main(int argc, char** argv) {
     if (cmd == "unlock") return cmd_lock(*repo, a, false);
     if (cmd == "locks") return cmd_locks(*repo, a);
     if (cmd == "graph") return cmd_graph(*repo, a);
+    if (cmd == "show") return cmd_show(*repo, a);
+    if (cmd == "review") return cmd_review(*repo, a);
+    if (cmd == "reviews") return cmd_reviews(*repo, a);
+    if (cmd == "ui") return cmd_ui(*repo, a);
     if (cmd == "remote") return cmd_remote(*repo, a);
     if (cmd == "push") return cmd_push(*repo, a);
     if (cmd == "pull") return cmd_pull(*repo, a);

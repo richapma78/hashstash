@@ -47,6 +47,12 @@ impact_depth = 3  # verify also runs the tests of callers up to this many levels
 [history]
 keep = 500        # lifecycle steps kept per branch for rollback (0 = keep all)
 
+[review]
+# Every commit carries a review flag: unreviewed, AI reviewed, or human reviewed.
+# Human approval is never required to commit, push or pull; this only says where
+# commits waiting for a person are listed for approval (hs ui, the hub's pages).
+approval = "both" # local | hub | both | off
+
 [import]
 # ignore = ["*.min.js", "data/**"]
 
@@ -127,6 +133,7 @@ void Repo::load_config() {
     else if (key == "tests.python") config_.test_command_python = unquote(val);
     else if (key == "tests.impact_depth") num(config_.tests_impact_depth);
     else if (key == "history.keep") num(config_.history_keep);
+    else if (key == "review.approval") config_.review_approval = unquote(val);
     else if (key == "publish.git_dir") config_.publish_git_dir = unquote(val);
     else if (key == "publish.remote") config_.publish_remote = unquote(val);
     else if (key == "publish.branch") config_.publish_branch = unquote(val);

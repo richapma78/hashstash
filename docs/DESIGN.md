@@ -169,6 +169,57 @@ commits.**
 * **Fresh code.** Bytecode caches in the generated tree are removed and
   `PYTHONDONTWRITEBYTECODE` is set. Python only notices a stale `.pyc` when a file's
   size or modification second changes, which a quick one-character edit may not do.
+* **One line per function.** Results are summarised per function ("18/20 passed,
+  2 failed"), and only failing tests are listed one by one (`-v` lists all). The same
+  summary appears in `hs tests summary`, `hs show`, the review pages and MCP
+  (`hs_test_summary`, `hs_show`, `hs_tests`). A function's numbers come from the
+  verification of that exact state first. A test's outcome also depends on the code
+  it calls, so a result from another state (say, with a broken helper) is used only
+  for tests that weren't run on this one. Verification reports travel with pushes
+  and pulls, so the client, the hub and every clone show the same numbers.
+
+## 5e. Reviews and the review flag
+
+Every commit carries a **review flag**, kept current in the `commit_review` table:
+
+| Flag | Meaning |
+|---|---|
+| `unreviewed` | nobody has reviewed it |
+| `ai` (AI reviewed) | only AI agents reviewed it |
+| `human` (human reviewed / approved) | a person looked too; `human_approved` says whether they approved |
+
+* **Reviews never block anything.** Commit, verify, push and pull work the same
+  whatever the flag says. The flag records who looked.
+* **Who counts as what.** Reviews through MCP (`hs_review`) are AI reviews. Reviews
+  on the review pages are a person's. `hs review` in a terminal is a person's, unless
+  it runs under an AI agent (Claude Code and others are detected; `HS_REVIEWER=human|ai`
+  overrides). On a hub, `--review-token` makes the pages ask for a token before
+  recording a person's review, so only people you give it to can mark commits human
+  reviewed.
+* **A review** has a reviewer, a verdict (`approved`, `changes_requested`, `comment`),
+  a summary (required unless approving) and optional line comments. Reviews are
+  append-only records keyed by id. A push sends the ones made locally, a pull fetches
+  the ones made elsewhere, and a new review is sent to `origin` straight away.
+* **Where approval is offered.** `[review] approval = "both"` (`local`, `hub`, `both`
+  or `off`) sets where commits waiting for a person are listed: the local pages
+  (`hs ui`), the hub's pages, or both.
+* `hs push` reports how much of what it pushed a person has reviewed, and the hub logs
+  every accepted push (`push_log`) so its pages can show each push's review state.
+
+## 5f. Review pages
+
+`hs ui` serves review pages for the local store on `http://127.0.0.1:7421`, and
+`hshub serve` serves the same pages for every hosted project at `/ui`:
+
+* **Overview:** commits with their verification and review flags, what is waiting for
+  a person, uncommitted changes, functions with failing tests, locks and (on a hub)
+  pushes with their review state.
+* **Commit:** line diffs per function, module code and deleted code, each with its
+  test summary, then the reviews and a form to approve, request changes or comment.
+* **Tests:** every function with its summary, failing ones first.
+* **Definition:** code, each linked test's result, notes, context, callers and history.
+
+With a hub token set, a browser enters it once and keeps it in a cookie.
 
 ## 5c. Lifecycle history and rollback
 
@@ -214,7 +265,13 @@ so they follow renames, roll back with history and sync with pushes.
 
 * `hs diff` reports changes per definition: added, removed, renamed, formatting-only
   or changed. Changed definitions show a line-by-line unified diff of their text,
-  like a GitHub diff but grouped by function.
+  like a GitHub diff but grouped by function. Added and removed definitions show
+  their full text, and module-level code (imports, constants, code between
+  definitions) gets its own line diff per file, with definitions shown as
+  one-line placeholders.
+* MCP `hs_commit` returns the line diff it committed (capped at 300 lines, the rest
+  listed by name), so an agent can confirm each commit is what it intended. `hs_show`
+  returns any commit in full.
 * Merges are three-way per definition. A conflict only exists when both sides
   changed the *same* definition; inside it, a line-level three-way merge resolves
   most of those automatically.
@@ -243,6 +300,8 @@ JSON over HTTP at `<hub>/api/p/<project>/<op>`, with an optional bearer token
 | `reachable` | objects reachable from a head, stopping at what the client already has |
 | `push` | move a branch head: compare-and-swap from `old` to `new` |
 | `lock`, `unlock`, `locks` | the shared lock service |
+| `put_reviews`, `reviews` | send reviews made on a client; fetch reviews after a sequence number |
+| `verification` | verification reports (test results) for one namespace or a batch |
 
 A push is accepted only when:
 * the new commit's closure is complete on the hub;
@@ -315,8 +374,12 @@ hs diff [name] [--from r --to r] per-definition diff
 hs commit -m <msg>               description required
 hs log [name]                    project or per-definition history
 hs history / rollback @<id>      lifecycle steps; restore without losing the latest
-hs verify [--all]                policy checks and linked tests; required before push
-hs tests ...                     show / link / unlink / suggest / autolink / missing
+hs verify [--all] [-v]           policy checks and linked tests; required before push
+hs show [commit]                 per-function line diffs, test summaries, reviews
+hs review [commit] approve|changes|comment [-m text]
+hs reviews                       review flags of recent commits
+hs ui [--port 7421]              review pages in the browser
+hs tests ...                     show / link / unlink / suggest / autolink / missing / summary
 hs note <name> <a>-<b> <text>    comment on a region, kept beside the code
 hs why <name> <text>             record origin / design / change context
 hs lock / unlock / locks
@@ -337,7 +400,8 @@ hs fragment <name> <lines>       cut a fragment out of a large definition
 ### Hub (`hshub`)
 
 ```
-hshub serve --root <dir> [--port 7420] [--token T]   HTTP sync, locks, MCP at /mcp/<project>
+hshub serve --root <dir> [--port 7420] [--token T] [--review-token R]
+                                  HTTP sync, locks, MCP at /mcp/<project>, review pages at /ui
 hshub create <project> --root <dir>
 hshub list --root <dir>
 hshub publish <project> --root <dir> [--branch b]
@@ -351,8 +415,9 @@ The same tool set is served by `hs mcp` (stdio, local project) and by `hshub`
 `hs_status`, `hs_find`, `hs_list`, `hs_view`, `hs_context`, `hs_graph`, `hs_lock`,
 `hs_unlock`, `hs_locks`, `hs_edit_def`, `hs_add_def`, `hs_delete_def`, `hs_tests`,
 `hs_link_tests`, `hs_unlink_tests`, `hs_missing_tests`, `hs_note`, `hs_why`, `hs_diff`,
-`hs_verify`, `hs_commit`, `hs_log`, `hs_history`, `hs_rollback`, `hs_render`,
-`hs_remotes`, `hs_pull`, `hs_push`, `hs_publish`.
+`hs_verify`, `hs_commit`, `hs_show`, `hs_review`, `hs_reviews`, `hs_test_summary`,
+`hs_log`, `hs_history`, `hs_rollback`, `hs_render`, `hs_remotes`, `hs_pull`,
+`hs_push`, `hs_publish`.
 Coming with later milestones: `hs_fragment`, `hs_merge`.
 
 An agent with only the local MCP server can therefore do the whole cycle: edit,
@@ -375,12 +440,13 @@ definitions without tests.
 ```
 src/core/      hashing, objects, canonical encoding, store (SQLite)
 src/lang/      language adapters over tree-sitter: python, c, cpp
-src/ops/       import, render, edit/update, diff, merge, locks, graph, sync
+src/ops/       import, render, edit/update, diff, merge, locks, graph, sync, reviews
 src/mcp/       MCP protocol and tool definitions
 src/cli/       hs
 src/hub/       hub service, storage interfaces, SQLite backend
 src/server/    hshub (HTTP server, job worker)
-tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub.sh
+src/web/       review pages (served by hs ui and hshub)
+tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub.sh, live_python.sh
 ```
 
 ## 12. Milestones

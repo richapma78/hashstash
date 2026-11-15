@@ -12,6 +12,7 @@
 #include "ops/publish.h"
 #include "ops/sync.h"
 #include "ops/query.h"
+#include "ops/review.h"
 #include "ops/tests.h"
 #include "ops/verify.h"
 
@@ -25,7 +26,8 @@ static const char* kInstructions =
     "with hs_render. Workflow: hs_find / hs_context to understand a definition (code, notes, "
     "context history, tests, callers, callees, change log); hs_lock it; hs_edit_def with the new "
     "code and a reason; add or link test cases (every function and method needs its own tests); "
-    "hs_verify; hs_commit with a description of what changed. Keep definitions small: responses "
+    "hs_verify; hs_commit with a description of what changed, check the diff it returns, then "
+    "hs_review your commit. Keep definitions small: responses "
     "warn when one grows past the review limit, so split it into helpers. Names can be "
     "'file.py:Class.method', 'module.Class.method', or a unique short name.";
 
@@ -130,8 +132,35 @@ json McpServer::tool_list() {
            {{"name", name}, {"from", prop("string", "work | head | head~N | @<history id> | <commit>")}, {"to", prop("string", "Same forms")}}),
       tool("hs_verify", "Check policy and run the linked tests of changed definitions. Required before push.",
            {{"all", prop("boolean", "Check every definition")}}),
-      tool("hs_commit", "Commit the working state. The message must describe what changed and why.",
+      tool("hs_commit",
+           "Commit the working state. The message must describe what changed and why. Returns the "
+           "line-by-line diff it committed (capped; hs_show for the rest) so you can confirm it.",
            {{"message", prop("string", "Description of the change")}}, {"message"}),
+      tool("hs_show",
+           "Review one commit: message, author, verification, review flag (unreviewed / AI / human), "
+           "line-by-line diff of every changed function and module code, per-function test summary "
+           "(e.g. '18/20 passed'), and its reviews.",
+           {{"commit", prop("string", "head (default), head~N, or a commit hash prefix")},
+            {"max_lines", prop("integer", "Cap on diff lines returned (default 600, 0 = all)")}}),
+      tool("hs_review",
+           "Record your review of a commit (recorded as an AI review). Read it with hs_show first. "
+           "Human approval is separate and never required; this records that an AI looked.",
+           {{"commit", prop("string", "head (default), head~N, or a commit hash prefix")},
+            {"verdict", {{"type", "string"}, {"enum", {"approved", "changes_requested", "comment"}}}},
+            {"summary", prop("string", "What you checked and found (needed unless approving)")},
+            {"comments", {{"type", "array"},
+                          {"description", "Line comments: [{name, line, text}] (line within the definition)"},
+                          {"items", {{"type", "object"}}}}}},
+           {"verdict"}),
+      tool("hs_reviews",
+           "Review flags of recent commits on this branch (unreviewed, AI reviewed, human reviewed or "
+           "approved), or the reviews of one commit.",
+           {{"commit", prop("string", "One commit (optional)")}, {"limit", prop("integer", "Commits to list (default 20)")}}),
+      tool("hs_test_summary",
+           "Test results per function: '20/100 passed, 3 failed' for each, failing ones first, without "
+           "listing individual tests.",
+           {{"prefix", prop("string", "Only definitions under this file or name prefix")},
+            {"only_problems", prop("boolean", "Only functions with failing, unrun or missing tests")}}),
       tool("hs_log", "Commit log, or the commits that changed one definition.",
            {{"name", name}, {"limit", prop("integer", "Max entries (default 20)")}}),
       tool("hs_history", "Lifecycle steps (import, update, commit, verify, rollback) with ids for rollback.",
@@ -260,15 +289,67 @@ json McpServer::call_tool(const std::string& t, const json& a) {
     if (a.contains("name")) {
       IndexRow row = resolve_name(r, need_str(a, "name"));
       std::erase_if(d.defs, [&](const DefChange& c) { return c.lineage != row.lineage; });
+      d.files_added.clear();
+      d.files_removed.clear();
+      d.files_glue_changed.clear();
+      d.module_changes.clear();
+      d.tests_changed = false;
     }
     return diff_to_json(s, d, true);
   }
   if (t == "hs_verify") return verify(r, a.value("all", false));
   if (t == "hs_commit") {
     auto c = commit(r, need_str(a, "message"));
-    json j = {{"commit", short_hash(c.commit)}, {"changes", diff_to_json(r.store(), c.diff, false)}};
+    json j = {{"commit", short_hash(c.commit)}, {"changes", diff_to_json(r.store(), c.diff, true, 300)}};
     if (verification_status(r, r.work_ns_hash()) != "passed") j["note"] = "not verified: run hs_verify before pushing";
+    j["review"] = "check the diff above is what you intended; hs_review records your review";
     return j;
+  }
+  if (t == "hs_show") return show_commit(r, resolve_commit(r, a.value("commit", "head")), a.value("max_lines", 600));
+  if (t == "hs_review") {
+    Review rv = add_review(r, a.value("commit", "head"), need_str(a, "verdict"), a.value("summary", ""), "ai",
+                           a.value("comments", json::array()));
+    json j = {{"recorded", review_to_json(rv)}, {"flag", review_status(r.store(), rv.commit).to_json()}};
+    std::string note = share_reviews(r);
+    if (!note.empty()) j["note"] = note;
+    return j;
+  }
+  if (t == "hs_reviews") {
+    if (a.contains("commit")) {
+      Hash h = resolve_commit(r, a["commit"]);
+      json rs = json::array();
+      for (auto& rv : reviews_of(r.store(), h)) rs.push_back(review_to_json(rv));
+      return {{"commit", h}, {"flag", review_status(r.store(), h).to_json()}, {"reviews", rs}};
+    }
+    json out = json::array();
+    for (auto& h : branch_commits(r, r.branch(), a.value("limit", 20))) {
+      json row = commit_row(r, h);
+      out.push_back({{"commit", row["short"]}, {"message", row["message"]}, {"author", row["author"]},
+                     {"when", row["when"]}, {"verification", row["verification"]}, {"review", row["review"]["label"]}});
+    }
+    return out;
+  }
+  if (t == "hs_test_summary") {
+    std::string prefix = a.value("prefix", "");
+    bool problems = a.value("only_problems", false);
+    json out = json::array();
+    int funcs = 0, total = 0, passed = 0, failed = 0;
+    std::vector<json> rows;
+    for (auto& [q, ts] : test_summaries(r, r.work_ns())) {
+      if (!prefix.empty() && !starts_with(q, prefix)) continue;
+      if (ts.total == 0 && !ts.needs_tests) continue;
+      ++funcs, total += ts.total, passed += ts.passed, failed += ts.failed;
+      bool ok = ts.total > 0 && ts.passed == ts.total;
+      if (problems && ok) continue;
+      json j = ts.to_json();
+      j["name"] = q;
+      rows.push_back(j);
+    }
+    // Failing first, then not run / missing, then passing.
+    auto rank = [](const json& j) { return j["failed"] > 0 ? 0 : j["total"] == 0 ? 1 : j["not_run"] > 0 ? 2 : 3; };
+    std::stable_sort(rows.begin(), rows.end(), [&](auto& x, auto& y) { return rank(x) < rank(y); });
+    for (auto& j : rows) out.push_back(j);
+    return {{"functions", funcs}, {"tests", total}, {"passed", passed}, {"failed", failed}, {"rows", out}};
   }
   if (t == "hs_log") return log(r, a.value("limit", 20), a.contains("name") ? qn() : "");
   if (t == "hs_history") {

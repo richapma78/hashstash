@@ -9,6 +9,7 @@
 #include "core/util.h"
 #include "ops/publish.h"
 #include "ops/repo.h"
+#include "ops/tests.h"
 #include "ops/verify.h"
 
 namespace hs {
@@ -144,9 +145,14 @@ json HubService::push(ProjectStore& p, const json& req) {
     report = v.dump();
   }
   p.set_verification(new_ns, "passed", report);
+  if (local && local->local_repo()) try {
+      record_test_results(local->local_repo()->store(), json::parse(report));
+    } catch (...) {
+    }
 
   if (!p.cas_branch(branch, old_head, new_head))
     throw std::runtime_error("push: " + branch + " moved on the hub; pull and retry");
+  p.log_push(branch, old_head, new_head, agent);
 
   // Sync this agent's locks.
   for (auto& l : p.locks())
@@ -229,6 +235,31 @@ json HubService::handle(const std::string& project, const std::string& op, const
     return {{"hashes", out}};
   }
   if (op == "push") return push(*p, req);
+  if (op == "put_reviews") {
+    int n = 0;
+    for (auto& r : req.at("reviews")) {
+      p->put_review(r);
+      ++n;
+    }
+    return {{"stored", n}};
+  }
+  if (op == "reviews") return p->reviews_after(req.value("after", 0LL));
+  if (op == "verification") {
+    auto one = [&](const Hash& ns) {
+      std::string rep = p->verification_report(ns);
+      json out = {{"ns", ns}, {"status", p->verification(ns)}};
+      try {
+        out["report"] = rep.empty() ? json::object() : json::parse(rep);
+      } catch (...) {
+        out["report"] = json::object();
+      }
+      return out;
+    };
+    if (req.at("ns").is_string()) return one(req["ns"]);
+    json all = json::array();
+    for (auto& ns : req["ns"]) all.push_back(one(ns));
+    return {{"reports", all}};
+  }
   if (op == "lock") {
     long long minutes = req.value("minutes", 15);
     HubLock l{req.at("target"), req.value("name", ""), req.at("agent"), now_seconds() + 60 * minutes};

@@ -40,4 +40,12 @@ nlohmann::json pull(Repo& repo, HubTransport& hub, const std::string& remote = "
 // instead of opening an HTTP connection.
 void set_lock_transport_override(HubTransport* t);
 
+// Reviews: send the ones made here, fetch the ones made elsewhere. push and
+// pull do both; these are for sending a new review right away.
+int send_reviews(Repo& repo, HubTransport& hub);
+int fetch_reviews(Repo& repo, HubTransport& hub, const std::string& remote);
+// Sends unsent reviews to "origin" if one is set (and HS_OFFLINE isn't).
+// Returns a note for the user: "" on success or when there is no hub.
+std::string share_reviews(Repo& repo);
+
 }  // namespace hs

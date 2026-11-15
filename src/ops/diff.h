@@ -28,9 +28,18 @@ struct DefChange {
   std::string lineage;
 };
 
+// A file whose module-level code (imports, constants, code between
+// definitions) was added, removed or changed. Entries are empty when absent.
+struct FileChange {
+  std::string path;
+  std::string kind;  // added | removed | changed
+  FileEntry old_entry, new_entry;
+};
+
 struct NamespaceDiff {
   std::vector<DefChange> defs;
   std::vector<std::string> files_added, files_removed, files_glue_changed;
+  std::vector<FileChange> module_changes;  // with text, for line diffs
   bool tests_changed = false;
   bool empty() const {
     return defs.empty() && files_added.empty() && files_removed.empty() &&
@@ -39,7 +48,18 @@ struct NamespaceDiff {
 };
 
 NamespaceDiff diff_namespaces(const Store& s, const Namespace& a, const Namespace& b);
-nlohmann::json diff_to_json(const Store& s, const NamespaceDiff& d, bool with_text);
+// with_text adds line diffs (and the full text of added/removed definitions).
+// max_lines > 0 caps the diff lines returned; the rest is listed by name only
+// and "truncated" says how much was left out.
+nlohmann::json diff_to_json(const Store& s, const NamespaceDiff& d, bool with_text, int max_lines = 0);
 std::string diff_to_text(const Store& s, const NamespaceDiff& d, bool with_text);
+
+// A definition's own text, with child definitions shown as one placeholder line.
+std::string own_text(const Store& s, const Hash& def);
+// A file's module-level code, with each definition shown as one placeholder line.
+std::string module_text(const Store& s, const FileEntry& e);
+// Text of a definition change's old and new versions ("" when absent).
+std::pair<std::string, std::string> change_texts(const Store& s, const DefChange& c);
+std::pair<std::string, std::string> change_texts(const Store& s, const FileChange& c);
 
 }  // namespace hs

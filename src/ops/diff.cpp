@@ -105,18 +105,82 @@ std::string unified_diff(const std::string& a, const std::string& b, int context
   return out;
 }
 
+std::string own_text(const Store& s, const Hash& h) {
+  // Children collapsed to a one-line placeholder so a class diff shows only its own text.
+  Def d = load_def(s, h);
+  std::string t;
+  for (auto& p : d.parts) {
+    if (p.type == Part::Text) t += p.text;
+    else if (p.type == Part::Def) {
+      Def c = load_def(s, p.hash);
+      std::string first = render_def(s, p.hash);
+      std::string indent_ws = first.substr(0, first.find_first_not_of(" \t"));
+      t += indent_ws + "... " + c.kind + " " + c.name + " ...\n";
+    } else {
+      t += load_frag(s, p.hash).text;
+    }
+  }
+  return t;
+}
+
+std::string module_text(const Store& s, const FileEntry& e) {
+  if (e.hash.empty()) return "";
+  if (e.kind == "blob") {
+    std::string body = s.must_get(e.hash).body;
+    bool binary = body.find('\0') != std::string::npos;
+    if (binary) return "(binary file, " + std::to_string(body.size()) + " bytes)\n";
+    return body;
+  }
+  std::string t;
+  for (auto& p : load_file(s, e.hash).parts) {
+    if (p.type == Part::Text) t += p.text;
+    else if (p.type == Part::Def) {
+      Def c = load_def(s, p.hash);
+      t += "... " + c.kind + " " + c.name + " ...\n";
+    } else {
+      t += load_frag(s, p.hash).text;
+    }
+  }
+  return t;
+}
+
+std::pair<std::string, std::string> change_texts(const Store& s, const DefChange& c) {
+  return {c.old_hash.empty() ? "" : own_text(s, c.old_hash), c.new_hash.empty() ? "" : own_text(s, c.new_hash)};
+}
+
+std::pair<std::string, std::string> change_texts(const Store& s, const FileChange& c) {
+  return {module_text(s, c.old_entry), module_text(s, c.new_entry)};
+}
+
+// Module code that is only definition placeholders and blank lines is not
+// worth showing for an added or removed file.
+static bool has_module_code(const std::string& t) {
+  for (auto& l : split_lines(t)) {
+    std::string x = trim(l);
+    if (!x.empty() && !(starts_with(x, "... ") && x.size() > 7 && x.substr(x.size() - 4) == " ...")) return true;
+  }
+  return false;
+}
+
 NamespaceDiff diff_namespaces(const Store& s, const Namespace& a, const Namespace& b) {
   NamespaceDiff d;
   for (auto& [f, e] : b.files)
-    if (!a.files.count(f)) d.files_added.push_back(f);
+    if (!a.files.count(f)) {
+      d.files_added.push_back(f);
+      if (has_module_code(module_text(s, e))) d.module_changes.push_back({f, "added", {}, e});
+    }
   for (auto& [f, e] : a.files)
-    if (!b.files.count(f)) d.files_removed.push_back(f);
+    if (!b.files.count(f)) {
+      d.files_removed.push_back(f);
+      if (has_module_code(module_text(s, e))) d.module_changes.push_back({f, "removed", e, {}});
+    }
   // Module-level glue per file.
   for (auto& [f, eb] : b.files) {
     auto it = a.files.find(f);
     if (it == a.files.end() || it->second.hash == eb.hash) continue;
     if (eb.kind != "file" || it->second.kind != "file") {
       d.files_glue_changed.push_back(f);
+      d.module_changes.push_back({f, "changed", it->second, eb});
       continue;
     }
     // Module code without blank lines: spacing between definitions isn't a change.
@@ -128,7 +192,10 @@ NamespaceDiff diff_namespaces(const Store& s, const Namespace& a, const Namespac
             if (!trim(l).empty()) g += l;
       return g;
     };
-    if (glue(it->second.hash) != glue(eb.hash)) d.files_glue_changed.push_back(f);
+    if (glue(it->second.hash) != glue(eb.hash)) {
+      d.files_glue_changed.push_back(f);
+      d.module_changes.push_back({f, "changed", it->second, eb});
+    }
   }
 
   auto fa = flatten(s, a), fb = flatten(s, b);
@@ -162,40 +229,64 @@ NamespaceDiff diff_namespaces(const Store& s, const Namespace& a, const Namespac
   return d;
 }
 
-static std::string own_render(const Store& s, const Hash& h) {
-  // Children collapsed to a one-line placeholder so a class diff shows only its own text.
-  Def d = load_def(s, h);
-  std::string t;
-  for (auto& p : d.parts) {
-    if (p.type == Part::Text) t += p.text;
-    else if (p.type == Part::Def) {
-      Def c = load_def(s, p.hash);
-      std::string first = render_def(s, p.hash);
-      std::string indent_ws = first.substr(0, first.find_first_not_of(" \t"));
-      t += indent_ws + "... " + c.kind + " " + c.name + " ...\n";
-    } else {
-      t += load_frag(s, p.hash).text;
-    }
+
+static std::string prefixed(const std::string& text, char mark) {
+  std::string out;
+  for (auto& l : split_lines(text)) {
+    std::string t = l;
+    while (!t.empty() && (t.back() == '\n' || t.back() == '\r')) t.pop_back();
+    out += std::string(1, mark) + t + "\n";
   }
-  return t;
+  return out;
 }
 
-nlohmann::json diff_to_json(const Store& s, const NamespaceDiff& d, bool with_text) {
+nlohmann::json diff_to_json(const Store& s, const NamespaceDiff& d, bool with_text, int max_lines) {
+  int used = 0, omitted = 0;
+  // Adds text under key if it fits the budget; otherwise marks it omitted.
+  auto put_text = [&](nlohmann::json& j, const char* key, const std::string& text) {
+    int n = count_lines(text);
+    if (max_lines > 0 && used + n > max_lines && used > 0) {
+      j["omitted_lines"] = n;
+      ++omitted;
+      return;
+    }
+    used += n;
+    j[key] = text;
+  };
   nlohmann::json defs = nlohmann::json::array();
   for (auto& c : d.defs) {
     nlohmann::json j = {{"change", c.kind}};
     if (!c.old_name.empty()) j["old"] = c.old_name;
     if (!c.new_name.empty()) j["new"] = c.new_name;
-    if (with_text && c.kind != "added" && c.kind != "removed")
-      j["diff"] = unified_diff(own_render(s, c.old_hash), own_render(s, c.new_hash));
-    if (with_text && c.kind == "added") j["text"] = own_render(s, c.new_hash);
+    if (with_text) {
+      auto [a, b] = change_texts(s, c);
+      if (c.kind == "added") put_text(j, "text", b);
+      else if (c.kind == "removed") put_text(j, "removed_text", a);
+      else put_text(j, "diff", unified_diff(a, b));
+    }
     defs.push_back(j);
   }
-  return {{"definitions", defs},
-          {"files_added", d.files_added},
-          {"files_removed", d.files_removed},
-          {"module_code_changed", d.files_glue_changed},
-          {"test_links_changed", d.tests_changed}};
+  nlohmann::json out = {{"definitions", defs},
+                        {"files_added", d.files_added},
+                        {"files_removed", d.files_removed},
+                        {"module_code_changed", d.files_glue_changed},
+                        {"test_links_changed", d.tests_changed}};
+  if (with_text && !d.module_changes.empty()) {
+    nlohmann::json mods = nlohmann::json::array();
+    for (auto& m : d.module_changes) {
+      nlohmann::json j = {{"file", m.path}, {"change", m.kind}};
+      auto [a, b] = change_texts(s, m);
+      if (m.kind == "added") put_text(j, "text", b);
+      else if (m.kind == "removed") put_text(j, "removed_text", a);
+      else put_text(j, "diff", unified_diff(a, b));
+      mods.push_back(j);
+    }
+    out["module_code"] = mods;
+  }
+  if (omitted)
+    out["truncated"] = std::to_string(omitted) + " change(s) listed without text to stay under " +
+                       std::to_string(max_lines) + " lines; use hs_diff with a name to see them";
+  return out;
 }
 
 std::string diff_to_text(const Store& s, const NamespaceDiff& d, bool with_text) {
@@ -210,12 +301,26 @@ std::string diff_to_text(const Store& s, const NamespaceDiff& d, bool with_text)
                            ? c.old_name + " -> " + c.new_name
                            : c.new_name;
     out += "  " + label + name + "\n";
-    if (with_text && (c.kind == "changed" || c.kind == "formatting" || c.kind == "renamed+changed")) {
-      for (auto& l : split_lines(unified_diff(own_render(s, c.old_hash), own_render(s, c.new_hash))))
-        out += "      " + l;
-    }
+    if (!with_text) continue;
+    auto [a, b] = change_texts(s, c);
+    std::string body = c.kind == "added" ? prefixed(b, '+') : c.kind == "removed" ? prefixed(a, '-') : unified_diff(a, b);
+    for (auto& l : split_lines(body)) out += "      " + l;
   }
-  for (auto& f : d.files_glue_changed) out += "  module code   " + f + "\n";
+  if (with_text) {
+    for (auto& m : d.module_changes) {
+      if (m.kind != "changed") continue;
+      out += "  module code   " + m.path + "\n";
+      auto [a, b] = change_texts(s, m);
+      for (auto& l : split_lines(unified_diff(a, b))) out += "      " + l;
+    }
+    for (auto& f : d.files_glue_changed) {
+      bool shown = false;
+      for (auto& m : d.module_changes) shown |= m.path == f;
+      if (!shown) out += "  module code   " + f + "\n";
+    }
+  } else {
+    for (auto& f : d.files_glue_changed) out += "  module code   " + f + "\n";
+  }
   if (d.tests_changed) out += "  test links changed\n";
   return out;
 }

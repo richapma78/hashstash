@@ -8,6 +8,8 @@
 #include <unordered_set>
 
 #include "ops/locks.h"
+#include "ops/review.h"
+#include "ops/tests.h"
 #include "ops/verify.h"
 
 namespace hs {
@@ -85,6 +87,15 @@ std::unordered_set<Hash> local_ancestors(const Store& s, const Hash& head) {
   return out;
 }
 
+// Commits reachable from head that are not ancestors of base.
+std::vector<Hash> local_reachable_commits(const Store& s, const Hash& head, const Hash& base) {
+  auto stop = local_ancestors(s, base);
+  std::vector<Hash> out;
+  for (auto& h : local_ancestors(s, head))
+    if (!stop.count(h)) out.push_back(h);
+  return out;
+}
+
 void sync_locks_down(Repo& repo, const std::string& remote, const json& locks) {
   Store& s = repo.store();
   s.transaction([&] {
@@ -130,6 +141,49 @@ struct RegisterHook {
 
 std::unique_ptr<HubTransport> http_transport(const std::string& url) { return std::make_unique<HttpTransport>(url); }
 
+int send_reviews(Repo& repo, HubTransport& hub) {
+  auto rs = unsynced_reviews(repo.store());
+  if (rs.empty()) return 0;
+  json arr = json::array();
+  for (auto& r : rs) arr.push_back(review_to_json(r));
+  hub.call("put_reviews", {{"reviews", arr}});
+  mark_reviews_synced(repo.store(), rs);
+  return (int)rs.size();
+}
+
+int fetch_reviews(Repo& repo, HubTransport& hub, const std::string& remote) {
+  Store& s = repo.store();
+  std::string key = "remote/" + remote + "/review_seq";
+  long long seq = 0;
+  try {
+    seq = std::stoll(s.ref(key).value_or("0"));
+  } catch (...) {
+  }
+  int got = 0;
+  for (;;) {
+    json res = hub.call("reviews", {{"after", seq}});
+    for (auto& r : res["reviews"])
+      if (store_review(s, review_from_json(r), true)) ++got;
+    long long last = res.value("last", seq);
+    if (last == seq || res["reviews"].empty()) break;
+    seq = last;
+  }
+  s.set_ref(key, std::to_string(seq));
+  return got;
+}
+
+std::string share_reviews(Repo& repo) {
+  if (const char* off = std::getenv("HS_OFFLINE"); off && *off) return "";
+  if (!remote_url(repo, "origin")) return "";
+  try {
+    auto hub = open_remote(repo, "origin");
+    send_reviews(repo, *hub);
+    return "";
+  } catch (std::exception& e) {
+    return std::string("review saved here; not sent to the hub yet (") + e.what() + "); hs push sends it later";
+  }
+}
+
 void set_lock_transport_override(HubTransport* t) { g_lock_override = t; }
 
 void set_remote(Repo& repo, const std::string& name, const std::string& url) {
@@ -171,7 +225,11 @@ json push(Repo& repo, HubTransport& hub, const std::string& remote, const std::s
 
   json refs = hub.call("refs", json::object());
   std::string theirs = refs["branches"].value(branch, "");
-  if (theirs == *head) return {{"branch", branch}, {"head", *head}, {"uploaded", 0}, {"note", "already up to date"}};
+  if (theirs == *head) {
+    int sent = send_reviews(repo, hub);
+    return {{"branch", branch}, {"head", *head}, {"uploaded", 0}, {"reviews_sent", sent},
+            {"note", sent ? "already up to date; sent " + std::to_string(sent) + " review(s)" : "already up to date"}};
+  }
   auto mine = local_ancestors(s, *head);
   if (!theirs.empty() && !mine.count(theirs))
     throw std::runtime_error("the hub's " + branch + " has commits you don't have: pull first");
@@ -216,7 +274,20 @@ json push(Repo& repo, HubTransport& hub, const std::string& remote, const std::s
                                {"verification", verification}, {"locks", locks}});
   s.set_ref("remote/" + remote + "/" + branch, *head);
   repo.record("push", ns, *head, "pushed " + branch + " to " + remote);
-  return {{"branch", branch}, {"head", *head}, {"uploaded", uploaded}};
+  log_push(s, branch, theirs, *head, repo.agent());
+  int sent = send_reviews(repo, hub);
+  // How much of what was just pushed a person has looked at.
+  int commits = 0, human = 0, ai = 0;
+  for (auto& c : local_reachable_commits(s, *head, theirs)) {
+    ++commits;
+    auto st = review_status(s, c);
+    if (st.human_reviewed) ++human;
+    else if (st.ai_reviewed) ++ai;
+  }
+  (void)res;
+  return {{"branch", branch}, {"head", *head}, {"uploaded", uploaded}, {"reviews_sent", sent},
+          {"commits", commits}, {"human_reviewed", human}, {"ai_reviewed_only", ai},
+          {"unreviewed", commits - human - ai}};
 }
 
 json pull(Repo& repo, HubTransport& hub, const std::string& remote, const std::string& branch_in) {
@@ -226,6 +297,8 @@ json pull(Repo& repo, HubTransport& hub, const std::string& remote, const std::s
   sync_locks_down(repo, remote, refs["locks"]);
   std::string theirs = refs["branches"].value(branch, "");
   json out = {{"branch", branch}, {"locks", refs["locks"].size()}};
+  send_reviews(repo, hub);
+  out["reviews_fetched"] = fetch_reviews(repo, hub, remote);
   if (theirs.empty()) {
     out["note"] = "the hub has no " + branch + " branch yet";
     return out;
@@ -275,9 +348,38 @@ json pull(Repo& repo, HubTransport& hub, const std::string& remote, const std::s
   Hash new_ns = load_commit(s, theirs).ns;
   s.set_ref("branch/" + branch, theirs);
   if (on_branch) repo.set_work_ns_hash(new_ns, "pull", "fast-forward to #" + short_hash(theirs) + " from " + remote);
-  // The hub verified it before accepting it.
-  Stmt st(s.db(), "INSERT OR IGNORE INTO verification(ns, status, time, agent, report) VALUES (?, 'passed', ?, ?, '{}')");
-  st.bind(1, new_ns).bind(2, now_seconds()).bind(3, "hub:" + remote).run();
+  // The hub verified each commit before accepting it; the reports carry the
+  // test results, so summaries here match the hub's. Oldest first, so the
+  // newest result for a test wins.
+  {
+    auto mine_anc = mine.empty() ? std::unordered_set<Hash>{} : local_ancestors(s, mine);
+    std::vector<std::pair<long long, Hash>> fresh;
+    for (auto& c : theirs_anc)
+      if (!mine_anc.count(c)) {
+        Commit cc = load_commit(s, c);
+        fresh.push_back({cc.time, cc.ns});
+      }
+    std::sort(fresh.begin(), fresh.end());
+    Stmt st(s.db(), "INSERT OR IGNORE INTO verification(ns, status, time, agent, report) VALUES (?, 'passed', ?, ?, ?)");
+    for (size_t i = 0; i < fresh.size(); i += 200) {
+      json batch = json::array();
+      for (size_t j = i; j < std::min(fresh.size(), i + 200); ++j) batch.push_back(fresh[j].second);
+      json reports;
+      try {
+        reports = hub.call("verification", {{"ns", batch}})["reports"];
+      } catch (...) {
+        reports = json::array();  // an older hub: results stay local
+      }
+      std::map<std::string, json> by_ns;
+      for (auto& r : reports) by_ns[r.value("ns", "")] = r.value("report", json::object());
+      for (size_t j = i; j < std::min(fresh.size(), i + 200); ++j) {
+        json rep = by_ns.count(fresh[j].second) ? by_ns[fresh[j].second] : json::object();
+        st.bind(1, fresh[j].second).bind(2, now_seconds()).bind(3, "hub:" + remote).bind(4, rep.dump()).run();
+        st.reset();
+        record_test_results(s, rep);
+      }
+    }
+  }
   out["result"] = "fast-forward to #" + short_hash(theirs);
   return out;
 }

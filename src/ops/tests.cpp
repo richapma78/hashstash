@@ -133,6 +133,95 @@ Hash suite_hash(Repo& repo, const Namespace& ns, const std::string& qname) {
   return hash_bytes("suite", body);
 }
 
+std::string TestSummary::label() const {
+  if (total == 0) return needs_tests ? "no tests" : "no tests needed";
+  std::string out = std::to_string(passed) + "/" + std::to_string(total) + " passed";
+  if (failed) out += ", " + std::to_string(failed) + " failed";
+  if (not_run) out += ", " + std::to_string(not_run) + " not run";
+  return out;
+}
+
+nlohmann::json TestSummary::to_json() const {
+  return {{"summary", label()}, {"total", total}, {"passed", passed}, {"failed", failed}, {"not_run", not_run}};
+}
+
+void record_test_results(Store& s, const nlohmann::json& report) {
+  if (!report.is_object() || !report.contains("tests_run")) return;
+  s.transaction([&] {
+    Stmt rec(s.db(),
+             "INSERT OR REPLACE INTO test_result(suite, test, test_hash, status, time, output) VALUES (?, ?, ?, ?, ?, ?)");
+    for (auto& t : report["tests_run"]) {
+      if (!t.contains("suites")) continue;
+      for (auto& suite : t["suites"]) {
+        rec.bind(1, suite.get<std::string>()).bind(2, t.value("test", "")).bind(3, t.value("test_hash", ""))
+            .bind(4, t.value("status", "")).bind(5, now_seconds()).bind(6, t.value("output", ""));
+        rec.run();
+        rec.reset();
+      }
+    }
+  });
+}
+
+std::map<std::string, TestSummary> test_summaries(Repo& repo, const Namespace& ns, const std::set<std::string>* only) {
+  Store& s = repo.store();
+  auto flat = flatten(s, ns);
+  std::map<std::string, const FlatDef*> by_lineage;
+  for (auto& f : flat) by_lineage[f.lineage] = &f;
+  Stmt st(s.db(), "SELECT status FROM test_result WHERE suite = ? AND test = ?");
+  // Results of verifying exactly this namespace come first: a test's outcome
+  // also depends on the code it calls, so a result recorded for the same
+  // function and tests in a different state (say, with a broken helper) may
+  // not hold here. The verification report travels with pushes, so the hub
+  // has it too.
+  std::map<std::string, std::string> verified;
+  {
+    Stmt v(s.db(), "SELECT report FROM verification WHERE ns = ?");
+    v.bind(1, put_namespace(s, ns));
+    if (v.step()) try {
+        auto rep = nlohmann::json::parse(v.text(0));
+        for (auto& t : rep.value("tests_run", nlohmann::json::array()))
+          verified[t.value("test", "")] = t.value("status", "");
+      } catch (...) {
+      }
+  }
+  std::map<std::string, TestSummary> out;
+  for (auto& f : flat) {
+    if (only && !only->count(f.qname)) continue;
+    if (is_test_def(f.file, f.qname)) continue;
+    TestSummary t;
+    t.qname = f.qname;
+    t.needs_tests = needs_tests(repo.config(), f.file, f.qname, f.def.kind);
+    std::vector<const FlatDef*> tests;
+    if (auto it = ns.tests.find(f.lineage); it != ns.tests.end())
+      for (auto& tid : it->second)
+        if (auto j = by_lineage.find(tid); j != by_lineage.end()) tests.push_back(j->second);
+    // Same suite hash as suite_hash(): the code plus all its tests.
+    std::vector<std::string> hashes;
+    for (auto* x : tests) hashes.push_back(x->hash);
+    std::sort(hashes.begin(), hashes.end());
+    std::string body = f.hash;
+    for (auto& h : hashes) body += "\n" + h;
+    Hash suite = hash_bytes("suite", body);
+    for (auto* x : tests) {
+      std::string status = "not run";
+      if (auto vit = verified.find(x->qname); vit != verified.end()) {
+        status = vit->second == "passed" ? "passed" : "failed";
+      } else {
+        st.bind(1, suite).bind(2, x->qname);
+        if (st.step()) status = st.text(0) == "passed" ? "passed" : "failed";
+        st.reset();
+      }
+      if (status == "passed") ++t.passed;
+      else if (status == "failed") ++t.failed;
+      else ++t.not_run;
+      t.results.push_back({x->qname, status});
+    }
+    t.total = (int)tests.size();
+    out[f.qname] = t;
+  }
+  return out;
+}
+
 nlohmann::json tests_info(Repo& repo, const std::string& qname) {
   Namespace ns = repo.work_ns();
   IndexRow r = resolve_name(repo, qname);
@@ -144,6 +233,9 @@ nlohmann::json tests_info(Repo& repo, const std::string& qname) {
                       {"suite_hash", short_hash(suite_hash(repo, ns, r.qname))},
                       {"tests", tests},
                       {"needs_tests", needs_tests(repo.config(), r.file, r.qname, r.kind)}};
+  std::set<std::string> one{r.qname};
+  auto sums = test_summaries(repo, ns, &one);
+  if (sums.count(r.qname)) j["results"] = sums[r.qname].to_json();
   if (tests.empty()) {
     auto s = suggest_tests(repo, r.qname);
     if (!s.empty()) j["suggested"] = s;

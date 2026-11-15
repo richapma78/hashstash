@@ -12,6 +12,9 @@
 //   verification  results keyed by namespace hash
 //   jobs          queued background work (render, publish), so pushes return
 //                 fast and many stateless hub servers can share the load
+//   reviews       append-only records keyed by id, plus the push log
+#include <nlohmann/json.hpp>
+
 #include <map>
 #include <memory>
 #include <optional>
@@ -56,6 +59,13 @@ class ProjectStore {
   // Verification
   virtual void set_verification(const Hash& ns, const std::string& status, const std::string& report) = 0;
   virtual std::string verification(const Hash& ns) = 0;
+  virtual std::string verification_report(const Hash& ns) = 0;  // JSON, or "" if none
+
+  // Reviews (append-only, keyed by id) and the log of accepted pushes
+  virtual void put_review(const nlohmann::json& review) = 0;
+  virtual nlohmann::json reviews_after(long long seq) = 0;  // {reviews, last}
+  virtual void log_push(const std::string& branch, const Hash& old_head, const Hash& new_head,
+                        const std::string& agent) = 0;
 
   // Batch work: everything between begin/commit is atomic.
   virtual void begin() = 0;

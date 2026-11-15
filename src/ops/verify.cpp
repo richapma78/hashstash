@@ -219,7 +219,13 @@ nlohmann::json verify(Repo& repo, bool all) {
         RunResult one = batch;
         if (batch.code != 0 && rows.size() > 1) one = run_in(dir, command_for(repo, r->lang, {node_of(r)}));
         std::string status = one.code == 0 ? "passed" : "failed";
-        nlohmann::json j = {{"test", r->qname}, {"status", status}};
+        nlohmann::json j = {{"test", r->qname}, {"status", status}, {"test_hash", r->hash}};
+        {
+          nlohmann::json su = nlohmann::json::array();
+          for (auto& x : suites_of_test[r->qname])
+            if (!x.empty()) su.push_back(x);
+          j["suites"] = su;
+        }
         if (one.code != 0) {
           j["output"] = one.output;
           failures.push_back({{"name", r->qname}, {"problem", "test failed"}});
@@ -237,6 +243,21 @@ nlohmann::json verify(Repo& repo, bool all) {
         }
       }
     }
+  }
+
+  // Per-function summary for everything under review or impacted.
+  {
+    std::set<std::string> fn;
+    for (auto& t : targets) fn.insert(t.qname);
+    for (auto& n : impacted) fn.insert(n.get<std::string>());
+    nlohmann::json funcs = nlohmann::json::array();
+    for (auto& [q, t] : test_summaries(repo, work, &fn)) {
+      if (t.total == 0 && !t.needs_tests) continue;
+      nlohmann::json j = t.to_json();
+      j["name"] = q;
+      funcs.push_back(j);
+    }
+    report["functions"] = funcs;
   }
 
   std::string status = failures.empty() ? "passed" : "failed";

@@ -63,6 +63,18 @@ run push
 out=$("$HS" context calc/ops.py:mul); echo "$out"
 expect '[[ "$out" == *"lines 5-7"* ]]' "note moved with the code"
 
+echo; echo "=== reviews: the AI checks its commit, then a person approves it"
+out=$("$HS" show head); echo "$out"
+expect '[[ "$out" == *"calc/ops.py:mul   [1/1 passed]"* && "$out" == *'"'"'+    if b < 0:'"'"'* ]]' "show has line diffs and the test summary"
+HS_REVIEWER=ai "$HS" review head approve -m "diff matches the message; test_mul passes"
+out=$("$HS" reviews); echo "$out"
+expect '[[ "$out" == *"AI reviewed"* ]]' "flag: AI reviewed"
+HS_REVIEWER=human "$HS" --as a-person review head approve
+out=$("$HS" reviews); echo "$out"
+expect '[[ "$out" == *"human approved"* ]]' "flag: human approved"
+page=$(curl -s "$URL/ui/p/$PROJECT")
+expect '[[ "$page" == *"human approved"* ]]' "the hub's review pages show the approval"
+
 echo; echo "=== bob pulls"
 cd "$W/calc-bob"; export HS_AGENT=bob
 out=$("$HS" pull 2>&1); echo "$out"

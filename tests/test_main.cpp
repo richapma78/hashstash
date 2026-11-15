@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,8 @@
 #include "ops/verify.h"
 #include "ops/import_render.h"
 #include "ops/repo.h"
+#include "ops/review.h"
+#include "ops/diff.h"
 
 using namespace hs;
 
@@ -250,6 +253,13 @@ TEST(verify_runs_python_tests) {
     auto r = verify(*repo, false);
     CHECK(r["status"] == "passed");
     CHECK(r["tests_run"].size() == 4);
+    {
+      std::set<std::string> one{"calc/ops.py:mul"};
+      auto sums = test_summaries(*repo, repo->work_ns(), &one);
+      CHECK(sums.count("calc/ops.py:mul") && sums["calc/ops.py:mul"].total >= 1 &&
+            sums["calc/ops.py:mul"].passed == sums["calc/ops.py:mul"].total);
+      CHECK(!r["functions"].empty());
+    }
     // As if pushed: later verifies review only what the hub has not seen.
     repo->store().set_ref("remote/origin/main", *repo->head_commit());
 
@@ -269,6 +279,11 @@ TEST(verify_runs_python_tests) {
       if (t["test"] == "tests/test_ops.py:test_mul") mul_failed = t["status"] == "failed";
     CHECK(mul_failed);
     CHECK(bad["impacted"].size() == 1 && bad["impacted"][0] == "calc/ops.py:mul");
+    {
+      auto sums = test_summaries(*repo, repo->work_ns());
+      CHECK(sums["calc/ops.py:add"].failed >= 1);
+      CHECK(sums["calc/ops.py:add"].label().find("failed") != std::string::npos);
+    }
   }
   fs::remove_all(dir);
 }
@@ -383,6 +398,106 @@ TEST(hub_sync) {
   }
   std::error_code ec;
   fs::remove_all(dir, ec);
+}
+
+TEST(diff_shows_module_code_and_removed_text) {
+  fs::path dir = temp_dir("diffmod");
+  {
+    fs::path src = dir / "src";
+    fs::copy(fs::path(HS_FIXTURES) / "sample_project", src, fs::copy_options::recursive);
+    auto repo = Repo::init(dir / "p", "t");
+    import_path(*repo, src);
+    commit(*repo, "import");
+    Hash before = repo->work_ns_hash();
+    // Module-level change: a new constant next to the definitions.
+    std::string ops = read_file(src / "calc" / "ops.py");
+    write_file(src / "calc" / "ops.py", ops.replace(ops.find("\"\"\"Arithmetic helpers.\"\"\"\n"), 26,
+                                                     "\"\"\"Arithmetic helpers.\"\"\"\n\nLIMIT = 100\n"));
+    import_path(*repo, src);
+    // Removed definition.
+    Namespace ns = repo->work_ns();
+    auto o = delete_def(*repo, ns, "calc/ops.py:mul");
+    CHECK(o.ok);
+    commit_edits(*repo, ns, {&o});
+    Store& s = repo->store();
+    auto d = diff_namespaces(s, load_namespace(s, before), repo->work_ns());
+    auto j = diff_to_json(s, d, true);
+    bool removed_text = false, module_diff = false;
+    for (auto& c : j["definitions"])
+      if (c["change"] == "removed" && c.value("removed_text", "").find("total = add(total, a)") != std::string::npos)
+        removed_text = true;
+    for (auto& m : j["module_code"])
+      if (m["file"] == "calc/ops.py" && m.value("diff", "").find("+LIMIT = 100") != std::string::npos) module_diff = true;
+    if (!module_diff || !removed_text) std::cerr << j.dump(2) << "\n";
+    CHECK(removed_text);
+    CHECK(module_diff);
+    // A cap lists the rest without text.
+    auto capped = diff_to_json(s, d, true, 1);
+    CHECK(capped.contains("truncated"));
+  }
+  fs::remove_all(dir);
+}
+
+TEST(review_flags_and_sync) {
+  fs::path dir = temp_dir("review");
+  {
+    auto backend = make_sqlite_backend(to_generic(dir / "hub"));
+    HubService svc(*backend);
+    svc.handle("demo", "create", {});
+    InProcessHub hub(svc, "demo");
+    set_lock_transport_override(&hub);
+
+    auto a = Repo::init(dir / "a", "demo");
+    a->set_agent("agent-a");
+    import_path(*a, fs::path(HS_FIXTURES) / "sample_project");
+    commit(*a, "import");
+    Hash c1 = *a->head_commit();
+    CHECK(review_status(a->store(), c1).level == "unreviewed");
+
+    // An AI review sets the flag to "ai"; a person's review to "human".
+    add_review(*a, "head", "approved", "", "ai");
+    CHECK(review_status(a->store(), c1).level == "ai");
+    CHECK(!review_status(a->store(), c1).human_reviewed);
+    bool refused = false;
+    try {
+      add_review(*a, "head", "changes_requested", "", "human");  // needs a summary
+    } catch (std::exception&) {
+      refused = true;
+    }
+    CHECK(refused);
+    add_review(*a, "head", "approve", "", "human", nlohmann::json::array(), "Richard");
+    auto st = review_status(a->store(), c1);
+    CHECK(st.level == "human" && st.human_approved && st.label() == "human approved");
+
+    // Push carries the reviews; the hub has the same flag.
+    a->store().exec("INSERT INTO verification(ns, status, time, agent, report) "
+                    "SELECT value, 'passed', 0, 'test', '{}' FROM ref WHERE name = 'work/main'");
+    auto pr = push(*a, hub);
+    CHECK(pr["reviews_sent"] == 2);
+    CHECK(pr["commits"] == 1 && pr["human_reviewed"] == 1);
+    Repo* h = dynamic_cast<LocalRepoAccess*>(backend->project("demo", false).get())->local_repo();
+    CHECK(review_status(h->store(), c1).level == "human");
+    CHECK(push_log(h->store(), 10).size() == 1);
+
+    // A review made on the hub (its pages) reaches a clone on pull.
+    add_review(*h, c1, "comment", "looks fine to me too", "human", nlohmann::json::array(), "Sam");
+    auto b = Repo::init(dir / "b", "demo");
+    b->set_agent("agent-b");
+    auto pl = pull(*b, hub, "origin", "main");
+    CHECK(pl["reviews_fetched"] == 3);
+    CHECK(reviews_of(b->store(), c1).size() == 3);
+    CHECK(review_status(b->store(), c1).human_approved);
+    auto again = pull(*b, hub, "origin", "main");
+    CHECK(again["reviews_fetched"] == 0);  // incremental
+
+    // show_commit has the diff, the flag and the reviews.
+    auto show = show_commit(*b, c1, 0);
+    CHECK(show["review"]["level"] == "human");
+    CHECK(show["reviews"].size() == 3);
+    CHECK(!show["diff"]["definitions"].empty());
+    set_lock_transport_override(nullptr);
+  }
+  fs::remove_all(dir);
 }
 
 TEST(roundtrip_corpus) {

@@ -12,7 +12,7 @@ include(cmake/deps.cmake)
 
 # ---- core library -----------------------------------------------------------
 file(GLOB_RECURSE HS_LIB_SOURCES CONFIGURE_DEPENDS
-  src/core/*.cpp src/lang/*.cpp src/ops/*.cpp src/mcp/*.cpp src/hub/*.cpp)
+  src/core/*.cpp src/lang/*.cpp src/ops/*.cpp src/mcp/*.cpp src/hub/*.cpp src/web/*.cpp)
 add_library(hashstash STATIC ${HS_LIB_SOURCES})
 target_include_directories(hashstash PUBLIC src)
 target_link_libraries(hashstash PUBLIC hs_sqlite hs_blake3 hs_treesitter hs_json hs_httplib)

@@ -8,6 +8,7 @@
 #include "hub/backend.h"
 #include "hub/service.h"
 #include "ops/repo.h"
+#include "ops/review.h"
 
 namespace hs {
 
@@ -85,6 +86,18 @@ class SqliteProject : public ProjectStore, public LocalRepoAccess {
     Stmt st(store().db(), "SELECT status FROM verification WHERE ns = ?");
     st.bind(1, ns);
     return st.step() ? st.text(0) : "";
+  }
+
+  std::string verification_report(const Hash& ns) override {
+    Stmt st(store().db(), "SELECT report FROM verification WHERE ns = ?");
+    st.bind(1, ns);
+    return st.step() ? st.text(0) : "";
+  }
+  void put_review(const nlohmann::json& r) override { store_review(store(), review_from_json(r), true); }
+  nlohmann::json reviews_after(long long seq) override { return hs::reviews_after(store(), seq); }
+  void log_push(const std::string& branch, const Hash& old_head, const Hash& new_head,
+                const std::string& agent) override {
+    hs::log_push(store(), branch, old_head, new_head, agent);
   }
 
   void begin() override { store().exec("BEGIN IMMEDIATE"); }

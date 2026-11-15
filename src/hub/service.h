@@ -10,6 +10,10 @@
 //   reachable    {from, have}        -> {hashes: [...]}           closure of from, minus commits in have
 //   push         {branch, old, new, agent, verification, locks} -> {head}
 //   lock         {target, name, agent, minutes} / unlock {target, agent, force} / locks
+//   put_reviews  {reviews: [...]}    -> {stored: n}               reviews made on a client
+//   reviews      {after: seq}        -> {reviews: [...], last}    reviews the client hasn't seen
+//   verification {ns}                -> {status, report}          test results of a namespace
+//                {ns: [...]}         -> {reports: [{ns, status, report}]}
 #include <nlohmann/json.hpp>
 
 #include "hub/backend.h"

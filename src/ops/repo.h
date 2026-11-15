@@ -27,6 +27,7 @@ struct Config {
   std::string test_command_python = "python -m pytest -q {tests}";
   int tests_impact_depth = 3;              // verify also runs tests of callers this deep (0 = off)
   int history_keep = 500;                  // lifecycle entries kept per branch (0 = all)
+  std::string review_approval = "both";    // where unreviewed commits are queued: local | hub | both | off
   // [publish]: render into a git working copy, commit and push.
   std::string publish_git_dir;             // relative to the project root, or absolute
   std::string publish_remote;              // git remote name or URL ("" = commit only)

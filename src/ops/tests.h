@@ -11,6 +11,8 @@
 // against it, so a result never outlives the code it was run on.
 #include <nlohmann/json.hpp>
 
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -41,6 +43,26 @@ std::vector<std::string> suggest_tests(Repo& repo, const std::string& def);
 int autolink_tests(Repo& repo);
 
 Hash suite_hash(Repo& repo, const Namespace& ns, const std::string& qname);
+
+// Per-function test summary: of the tests linked to it, how many passed and
+// failed. Results from verifying exactly this namespace come first; other
+// tests use the latest result for the same code and tests (suite hash), and
+// count as not run when there is none.
+struct TestSummary {
+  std::string qname;
+  int total = 0, passed = 0, failed = 0, not_run = 0;
+  bool needs_tests = false;
+  std::vector<std::pair<std::string, std::string>> results;  // (test, passed | failed | not run)
+  std::string label() const;  // "3/4 passed, 1 failed", "no tests", ...
+  nlohmann::json to_json() const;
+};
+// Stores the per-test results of a verification report (from this machine, or
+// received with a push or pull) so summaries elsewhere show the same numbers.
+void record_test_results(Store& s, const nlohmann::json& report);
+
+// Summaries for the non-test definitions of ns (all, or only those named).
+std::map<std::string, TestSummary> test_summaries(Repo& repo, const Namespace& ns,
+                                                  const std::set<std::string>* only = nullptr);
 nlohmann::json tests_info(Repo& repo, const std::string& qname);
 
 }  // namespace hs

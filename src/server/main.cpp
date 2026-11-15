@@ -15,6 +15,7 @@
 #include "mcp/server.h"
 #include "ops/publish.h"
 #include "ops/repo.h"
+#include "web/ui.h"
 
 using namespace hs;
 using json = nlohmann::json;
@@ -22,6 +23,7 @@ using json = nlohmann::json;
 static const char* kUsage = R"(hshub - hashstash hub server
 
   hshub serve   [--root dir] [--host 127.0.0.1] [--port 7420] [--verify-on-push] [--token secret]
+                [--review-token secret]
   hshub create  <project> [--root dir]
   hshub list    [--root dir]
   hshub publish <project> [--branch main] [--root dir]
@@ -29,7 +31,11 @@ static const char* kUsage = R"(hshub - hashstash hub server
 Clients use http://<host>:<port>/<project> as their remote:
   hs remote add origin http://localhost:7420/myproject
 Agents can use the hub's MCP endpoint directly: http://<host>:<port>/mcp/<project>
-With --token (or HS_HUB_TOKEN), clients must send the same token (HS_TOKEN).
+Review pages for people: http://<host>:<port>/ui
+With --token (or HS_HUB_TOKEN), clients must send the same token (HS_TOKEN), and the
+review pages ask for it once per browser.
+With --review-token (or HS_HUB_REVIEW_TOKEN), recording a person's review on the pages
+needs that token too, so only people you give it to can mark commits as human reviewed.
 Publishing is set per project in <root>/<project>/.hs/config.toml under [publish].
 )";
 
@@ -75,12 +81,40 @@ int serve(const std::map<std::string, std::string>& o) {
     return false;
   };
 
-  srv.Get("/", [&](const httplib::Request&, httplib::Response& res) {
-    std::lock_guard<std::mutex> g(mu);
-    std::string body = "hashstash hub\n\nProjects:\n";
-    for (auto& p : backend->projects()) body += "  " + p + "\n";
-    res.set_content(body, "text/plain");
-  });
+  srv.Get("/", [&](const httplib::Request&, httplib::Response& res) { res.set_redirect("/ui"); });
+
+  // Review pages. With a hub token, a browser enters it once (kept in a cookie).
+  std::string review_token =
+      get(o, "--review-token", std::getenv("HS_HUB_REVIEW_TOKEN") ? std::getenv("HS_HUB_REVIEW_TOKEN") : "");
+  if (!token.empty()) {
+    srv.set_pre_routing_handler([&](const httplib::Request& req, httplib::Response& res) {
+      if (!starts_with(req.path, "/ui") || req.path == "/ui/login") return httplib::Server::HandlerResponse::Unhandled;
+      if (req.get_header_value("Cookie").find("hs_token=" + token) != std::string::npos)
+        return httplib::Server::HandlerResponse::Unhandled;
+      res.set_content("<!doctype html><meta charset=utf-8><title>hashstash hub</title>"
+                      "<body style=\"font:16px system-ui;margin:40px\"><h1>hashstash hub</h1>"
+                      "<form method=post action=/ui/login>Hub token <input type=password name=token autofocus> "
+                      "<button>Open</button></form>",
+                      "text/html; charset=utf-8");
+      return httplib::Server::HandlerResponse::Handled;
+    });
+    srv.Post("/ui/login", [&](const httplib::Request& req, httplib::Response& res) {
+      if (req.get_param_value("token") == token)
+        res.set_header("Set-Cookie", "hs_token=" + token + "; Path=/; HttpOnly; SameSite=Strict");
+      res.set_redirect("/ui", 303);
+    });
+  }
+  UiSite site;
+  site.where = "hub";
+  site.projects = [&] { return backend->projects(); };
+  site.open = [&](const std::string& name) -> Repo* {
+    auto p = backend->project(name, false);
+    auto* local = p ? dynamic_cast<LocalRepoAccess*>(p.get()) : nullptr;
+    return local ? local->local_repo() : nullptr;
+  };
+  site.mu = &mu;
+  site.review_token = review_token;
+  mount_ui(srv, site);
   srv.Get("/api/projects", [&](const httplib::Request& req, httplib::Response& res) {
     if (!authorized(req, res)) return;
     std::lock_guard<std::mutex> g(mu);
@@ -142,7 +176,8 @@ int serve(const std::map<std::string, std::string>& o) {
   });
 
   std::cout << "hshub serving " << to_generic(fs::absolute(from_utf8(root))) << " on http://" << host << ":" << port
-            << (token.empty() ? "" : " (token required)") << std::endl;
+            << (token.empty() ? "" : " (token required)") << "\n  review pages: http://" << host << ":" << port
+            << "/ui" << std::endl;
   bool ok = srv.listen(host, port);
   running = false;
   worker.join();
