@@ -895,6 +895,107 @@ TEST(git_ignore_rules) {
   fs::remove_all(dir, ec);
 }
 
+// A Godot 4 project: GDScript functions, inner classes, properties and enums;
+// scene nodes, resources and signal connections; project settings sections.
+// Everything round-trips byte for byte, the editor cache is skipped, and
+// references show in the graph.
+TEST(godot_project) {
+  fs::path dir = temp_dir("godot");
+  {
+    fs::path src = fs::path(HS_FIXTURES) / "godot_project";
+    auto r = Repo::init(dir / "p", "game");
+    auto res = import_path(*r, src);
+    CHECK(res.skipped == 1);  // .godot/
+    auto kind_of = [&](const std::string& q) {
+      auto row = row_by_qname(*r, q);
+      return row ? row->kind : std::string("(missing)");
+    };
+    CHECK(kind_of("player.gd:_physics_process") == "function");
+    CHECK(kind_of("player.gd:take_damage") == "function");
+    CHECK(kind_of("player.gd:_init") == "function");
+    CHECK(kind_of("player.gd:make") == "function");
+    CHECK(kind_of("player.gd:health") == "property");
+    CHECK(kind_of("player.gd:State") == "enum");
+    CHECK(kind_of("player.gd:Inventory") == "class");
+    CHECK(kind_of("player.gd:Inventory.add") == "method");
+    CHECK(kind_of("player.gd:SPEED") == "(missing)");  // constants stay module code
+    CHECK(kind_of("scenes/player.tscn:Player") == "node");
+    CHECK(kind_of("scenes/player.tscn:Hurtbox/Shape") == "node");
+    CHECK(kind_of("scenes/player.tscn:Label") == "node");
+    CHECK(kind_of("scenes/player.tscn:ext_1_k3j2h") == "ext_resource");
+    CHECK(kind_of("scenes/player.tscn:RectangleShape2D_x7c2v") == "sub_resource");
+    CHECK(kind_of("scenes/player.tscn:Hurtbox/body_entered-take_damage") == "connection");
+    CHECK(kind_of("resources/stats.tres:resource") == "resource");
+    CHECK(kind_of("project.godot:input") == "section");
+    CHECK(list_defs(*r, "scenes/player.tscn").size() == 12);  // "[one]" inside the Label's text is not a section
+
+    // Annotations and comments above a function belong to it; the file's @tool does not.
+    std::string td = render_def(r->store(), resolve_name(*r, "player.gd:take_damage").hash);
+    CHECK(starts_with(td, "@rpc(\"any_peer\")\nfunc take_damage"));
+    std::string pp = render_def(r->store(), resolve_name(*r, "player.gd:_physics_process").hash);
+    CHECK(starts_with(pp, "# Moves the player"));
+    Namespace ns0 = r->work_ns();
+    std::string glue = render_entry(r->store(), ns0.files.at("player.gd"));
+    CHECK(starts_with(glue, "@tool\nclass_name Player"));
+
+    // Byte-for-byte round trip of every file.
+    render_to(*r, dir / "out");
+    for (auto& rel : {"player.gd", "project.godot", "scenes/player.tscn", "resources/stats.tres",
+                      "resources/stats.gd", "test/test_player.gd", "icon.svg", "icon.svg.import", "player.gd.uid"})
+      CHECK(read_file(dir / "out" / rel) == read_file(src / rel));
+    CHECK(!fs::exists(dir / "out" / ".godot"));
+
+    // The graph: scene -> script and resources, connection -> the script's handler.
+    json callees_root = callees(*r, "scenes/player.tscn:Player");
+    bool uses_script = false;
+    for (auto& c : callees_root) uses_script |= c.value("callee", "") == "scenes/player.tscn:ext_1_k3j2h";
+    CHECK(uses_script);
+    json handler = callees(*r, "scenes/player.tscn:Hurtbox/body_entered-take_damage");
+    CHECK(!handler.empty() && handler[0].value("callee", "") == "player.gd:take_damage");
+
+    // Editing one node changes that node only.
+    commit(*r, "import");
+    Namespace ns = r->work_ns();
+    auto e = replace_def(*r, ns, "scenes/player.tscn:Sprite2D",
+                         "[node name=\"Sprite2D\" type=\"Sprite2D\" parent=\".\"]\ntexture = ExtResource(\"2_m8f4d\")\nhframes = 4\n",
+                         "", "four frames");
+    CHECK(e.ok);
+    auto e2 = replace_def(*r, ns, "player.gd:make", "static func make() -> Player:\n\tvar p := Player.new()\n\treturn p\n", "",
+                          "named local");
+    CHECK(e2.ok);
+    commit_edits(*r, ns, {&e, &e2});
+    auto d = diff_namespaces(r->store(), load_namespace(r->store(), r->head_ns_hash()), r->work_ns());
+    CHECK(d.defs.size() == 2);
+    std::set<std::string> changed;
+    for (auto& x : d.defs) changed.insert(x.new_name);
+    CHECK(changed.count("scenes/player.tscn:Sprite2D") && changed.count("player.gd:make"));
+    render_to(*r, dir / "out2");
+    std::string scene = read_file(dir / "out2" / "scenes" / "player.tscn");
+    CHECK(scene.find("hframes = 4") != std::string::npos && scene.find("[node name=\"Label\"") != std::string::npos);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// Stores record their format: older ones are upgraded on open, newer ones refused.
+TEST(store_format_versions) {
+  fs::path dir = temp_dir("storever");
+  std::string db = to_generic(dir / "s.db");
+  {
+    Store s(db);
+    s.exec("UPDATE meta SET value = '1' WHERE key = 'schema_version'");
+  }
+  {
+    Store s(db);  // upgrades 1 -> current
+    Stmt st(s.db(), "SELECT value FROM meta WHERE key = 'schema_version'");
+    CHECK(st.step() && st.text(0) == std::to_string(kStoreVersion));
+    s.exec("UPDATE meta SET value = '99' WHERE key = 'schema_version'");
+  }
+  CHECK(throws([&] { Store s(db); }));  // written by a newer hashstash
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST(roundtrip_corpus) {
   const char* dir = std::getenv("HS_ROUNDTRIP_DIR");
   if (!dir) return;

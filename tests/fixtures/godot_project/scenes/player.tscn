@@ -1,0 +1,40 @@
+[gd_scene load_steps=5 format=3 uid="uid://b6x3k2mfq8n1p"]
+
+[ext_resource type="Script" path="res://player.gd" id="1_k3j2h"]
+[ext_resource type="Texture2D" uid="uid://c2v7y1t0kq4wd" path="res://icon.svg" id="2_m8f4d"]
+[ext_resource type="Resource" path="res://resources/stats.tres" id="3_p0q9z"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_x7c2v"]
+size = Vector2(32, 64)
+
+[sub_resource type="Animation" id="Animation_r4t5y"]
+resource_name = "idle"
+length = 0.5
+tracks/0/type = "value"
+tracks/0/path = NodePath("Sprite2D:frame")
+tracks/0/keys = {
+"times": PackedFloat32Array(0, 0.25),
+"values": [0, 1]
+}
+
+[node name="Player" type="CharacterBody2D"]
+script = ExtResource("1_k3j2h")
+stats = ExtResource("3_p0q9z")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+texture = ExtResource("2_m8f4d")
+hframes = 2
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("RectangleShape2D_x7c2v")
+
+[node name="Hurtbox" type="Area2D" parent="."]
+
+[node name="Shape" type="CollisionShape2D" parent="Hurtbox"]
+shape = SubResource("RectangleShape2D_x7c2v")
+
+[node name="Label" type="Label" parent="."]
+text = "Player
+[one]"
+
+[connection signal="body_entered" from="Hurtbox" to="." method="take_damage"]

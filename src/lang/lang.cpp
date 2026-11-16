@@ -6,12 +6,16 @@ namespace hs {
 
 std::unique_ptr<Language> make_python();
 std::unique_ptr<Language> make_cpp();
+std::unique_ptr<Language> make_gdscript();
+std::unique_ptr<Language> make_godot_resource();
 
 const std::vector<std::unique_ptr<Language>>& languages() {
   static std::vector<std::unique_ptr<Language>> all = [] {
     std::vector<std::unique_ptr<Language>> v;
     v.push_back(make_python());
     v.push_back(make_cpp());
+    v.push_back(make_gdscript());
+    v.push_back(make_godot_resource());
     return v;
   }();
   return all;

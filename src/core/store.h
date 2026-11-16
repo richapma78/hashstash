@@ -43,6 +43,9 @@ class Stmt {
   sqlite3_stmt* st_ = nullptr;
 };
 
+// The store format this build reads and writes (see Store::Store).
+constexpr int kStoreVersion = 2;
+
 class Store {
  public:
   // Opens (and creates/migrates if needed) the database file.

@@ -248,6 +248,9 @@ struct Resolver {
       }
       if (n)
         if (auto h = exact(n->file, n->path + "." + parts[1])) return {*h};
+      // A GDScript file is itself a class: self.f() in it calls its top-level f.
+      if (!n)
+        if (auto h = exact(caller.file, parts[1])) return {*h};
       return by_short(member_by_short, parts[1]);
     }
     // Longest prefix naming an imported module or definition.

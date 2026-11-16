@@ -1,0 +1,8 @@
+[gd_resource type="Resource" script_class="Stats" load_steps=2 format=3 uid="uid://d1m2n3b4v5c6x"]
+
+[ext_resource type="Script" path="res://resources/stats.gd" id="1_s7d8f"]
+
+[resource]
+script = ExtResource("1_s7d8f")
+max_health = 120
+speed = 300.0

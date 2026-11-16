@@ -279,10 +279,12 @@ int cmd_ls(Repo& repo, const Args& a) {
     for (auto& r : rows) j.push_back({{"name", r.qname}, {"kind", r.kind}, {"hash", short_hash(r.hash)}});
     return out_json(j), 0;
   }
+  size_t width = 8;
+  for (auto& r : rows) width = std::max(width, r.kind.size());
   for (auto& r : rows) {
     int depth = (int)std::count(r.qname.begin() + r.qname.find(':'), r.qname.end(), '.');
     std::string kind = r.kind;
-    kind.resize(10, ' ');
+    kind.resize(width + 2, ' ');
     std::cout << short_hash(r.hash, 8) << "  " << kind << std::string(depth * 2, ' ') << r.qname << "\n";
   }
   return 0;

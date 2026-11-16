@@ -492,6 +492,8 @@ void commit_edits(Repo& repo, const Namespace& ns, std::vector<EditOutcome*> out
 
 static std::string ext_for(const std::string& lang) {
   if (lang == "python") return "py";
+  if (lang == "gdscript") return "gd";
+  if (lang == "godot") return "tscn";
   return lang;
 }
 

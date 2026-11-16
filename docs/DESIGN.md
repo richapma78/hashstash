@@ -59,6 +59,42 @@ characters).
 | **Namespace** | The tree of a project: qualified names to Def hashes, file paths to crumbtrails, plus each definition's lineage ID. |
 | **Commit** | A namespace hash, parent commit hashes, author, time and message. |
 
+### Languages and what becomes a definition
+
+| Files | Adapter | Definitions | Stays glue (module code) |
+|-------|---------|-------------|--------------------------|
+| `.py`, `.pyi` | python | functions, classes, methods, nested classes (decorators and comments above belong to them) | imports, constants, top-level statements |
+| `.c`, `.h`, `.cpp`, `.hpp`, ... | cpp | functions, records, namespaces (as containers), templates, out-of-class `A::f` as methods | `#include`s, forward declarations, `using` |
+| `.gd` | gdscript | `func`s (functions at the top, methods in an inner `class`), inner classes, `_init`, properties with `set`/`get` code, enums (comments and `@annotations` above belong to them) | `extends`, `class_name`, signals, constants, plain `var`s, the file's `@tool` |
+| `.tscn`, `.tres`, `.escn`, `project.godot` | godot | each section: `node` (named by its path from the scene root, as `get_node()` takes it: `Player`, `Sprite2D`, `Hurtbox/Shape`), `ext_resource` (`ext_<id>`), `sub_resource` (its id), `resource`, `connection` (`<from>/<signal>-<method>`), and the `[sections]` of `project.godot` | the `[gd_scene]` / `[gd_resource]` header, blank lines |
+
+Everything else is stored whole as a blob (images, audio, `.import` and `.uid` files),
+still versioned and synced. Godot's editor caches (`.godot/`, Godot 3's `.import/`)
+are skipped on import. In scenes, `ExtResource("id")`, `SubResource("id")` and a
+connection's method are recorded as calls, so the graph shows which nodes use which
+resources and which script function handles a signal. The Godot adapter was checked
+against Godot's demo projects: 1,133 scripts, scenes and resources, every one
+rendered back byte for byte.
+
+### Format evolution
+
+Stored data has to keep working as hashstash changes:
+
+* **Objects only grow.** A new field is optional, left out when empty, and ignored by
+  readers that don't know it, so existing objects keep their hashes and older and
+  newer versions can share a hub. (Example: `git_ignore` on namespaces.)
+* **New languages and kinds are just new values** of `lang` and `kind`. Changing an
+  adapter's rules later doesn't invalidate stored objects: they hold text, not parse
+  trees, and files are re-split only when they are edited or imported again.
+* **Stores are versioned.** Each store records its format (`kStoreVersion` in
+  `src/core/store.h`). Opening one runs the numbered migrations it is missing, in
+  order, and a store written by a newer hashstash is refused instead of misread.
+* **If an object encoding ever has to change** in a way that changes hashes, the plan
+  is an `hs upgrade` that rewrites every object into the new form, maps old hashes to
+  new ones (commits, namespaces, files and definitions refer to each other by hash),
+  keeps lineage ids, history, reviews and verification records attached, and keeps
+  the old-to-new map so links to old hashes still resolve.
+
 ### Two hashes per definition
 
 * The **content hash** covers the exact text, comments and formatting included. It
@@ -155,7 +191,10 @@ several definitions (a test may build whatever higher-level objects it needs).
 `hs verify` checks the policy (tests linked, size limits) for every definition
 the hub has not seen yet, meaning changes since the branch's last pushed or pulled
 commit (everything, before the first push). It then generates the source tree, runs
-the linked tests (`[tests] python = "python -m pytest -q {tests}"`), and records the
+the linked tests (`[tests] python = "python -m pytest -q {tests}"`; for GDScript, set
+`[tests] gdscript`, e.g. `godot --headless -s addons/gut/gut_cmdln.gd -gtest={file}
+-gunit_test_name={tests} -gexit` for GUT, where `{file}` is the test script's `res://`
+path and `{tests}` one test, or empty for the whole file), and records the
 result against the namespace hash. Commits are local; **a push only accepts verified
 commits.**
 
@@ -579,13 +618,14 @@ definitions without tests.
 
 * C++20, CMake, Ninja. Windows (MinGW-w64 GCC and MSVC) and Linux (GCC, Clang).
 * Libraries, all permissively licensed and fetched by CMake:
-  SQLite (storage), tree-sitter with the Python, C and C++ grammars (parsing),
+  SQLite (storage), tree-sitter with the Python, C, C++ and GDScript grammars (parsing),
   BLAKE3 (hashing), nlohmann/json (MCP and wire format), cpp-httplib (hub and sync).
 * Layout:
 
 ```
 src/core/      hashing, objects, canonical encoding, store (SQLite)
-src/lang/      language adapters over tree-sitter: python, c, cpp
+src/lang/      language adapters: python, c, cpp, gdscript (tree-sitter); Godot scenes
+               and resources (godot.cpp)
 src/ops/       import, render, edit/update, diff, merge, locks, graph, sync, reviews,
                coordination (work items, requests, events) and work (their operations)
 src/mcp/       MCP protocol and tool definitions
@@ -608,6 +648,8 @@ tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub
    *(done)*; branches and merge next.
 4. **C and C++.** Adapter for functions, records, namespaces, templates and
    preprocessor blocks *(done)*; header/source pairing and overloads next.
+4a. **Godot.** GDScript and text scenes, resources and project settings *(done)*;
+   GUT / gdUnit4 through `[tests] gdscript`.
 5. **Git bridge.** Publish rendered branches to git *(done)*; incremental mirroring.
 6. **Scale.** Object store, Postgres refs and locks, queue-backed workers behind the
    same interfaces.
@@ -624,6 +666,12 @@ tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub
   without the `hs` command.
 * **Python bindings.** The C++ core callable from Python: open a local store, query
   definitions and the call graph, edit and commit.
+* **3D models and other binary assets.** Beyond storing them whole: split glTF
+  into meshes, materials, nodes and animations (hashed like definitions, so a change
+  shows as "material Body changed"); chunked storage so a small edit to a large file
+  doesn't store it all again; previews and metadata (triangles, bounds, materials)
+  on the review pages; exclusive locks by default, since binaries can't be merged;
+  publish to git through Git LFS.
 * **Hub discovery for agents.** A hub-wide MCP endpoint (`/mcp`) with tools to list and
   create projects, registered once in an agent's user-level MCP settings so every
   session finds the hub; optionally start the hub at logon.

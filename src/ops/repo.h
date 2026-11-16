@@ -28,6 +28,10 @@ struct Config {
   std::string requests_on_commit = "block";  // [work] requests: open change requests on what you commit: block | warn
   std::vector<std::string> tests_exempt;   // short-name globs that need no tests
   std::string test_command_python = "python -m pytest -q {tests}";
+  // GDScript tests (GUT, gdUnit4): {file} = res:// path of the test script,
+  // {tests} = the test function when run one at a time ("" for the whole file).
+  // e.g. godot --headless -s addons/gut/gut_cmdln.gd -gtest={file} -gunit_test_name={tests} -gexit
+  std::string test_command_gdscript;
   int tests_impact_depth = 3;              // verify also runs tests of callers this deep (0 = off)
   int history_keep = 500;                  // lifecycle entries kept per branch (0 = all)
   std::string review_approval = "both";    // where unreviewed commits are queued: local | hub | both | off

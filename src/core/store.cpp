@@ -269,17 +269,41 @@ Store::Store(const std::string& db_path) {
   }
   sqlite3_busy_timeout(db_, 10000);
   exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
-  exec(kSchema);
-  // Migrations for stores created by earlier versions.
-  try {
-    exec("ALTER TABLE lock ADD COLUMN origin TEXT NOT NULL DEFAULT ''");  // '' = local, else remote name
-  } catch (...) {
+  // Store format. A store records the version that last upgraded it; opening
+  // runs the migrations it is missing, in order, and a store from a newer
+  // hashstash is refused rather than misread. Objects themselves evolve only by
+  // adding optional fields (left out when empty, ignored by readers that don't
+  // know them), so their hashes stay valid across versions. See DESIGN.md,
+  // "Format evolution".
+  std::string found;
+  {
+    exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    Stmt st(db_, "SELECT value FROM meta WHERE key = 'schema_version'");
+    if (st.step()) found = st.text(0);
   }
-  try {
-    exec("ALTER TABLE lock ADD COLUMN work TEXT NOT NULL DEFAULT ''");  // work item the lock is for
-  } catch (...) {
+  int version = found.empty() ? 0 : std::stoi(found);
+  if (version > kStoreVersion)
+    throw std::runtime_error("store " + db_path + " uses format " + std::to_string(version) +
+                             ", written by a newer hashstash; this one reads up to format " +
+                             std::to_string(kStoreVersion) + ". Update hs / hshub.");
+  exec(kSchema);  // creates what is missing (CREATE ... IF NOT EXISTS)
+  // Migrations: entry i upgrades format i to i + 1. Append, never edit.
+  static const std::vector<std::vector<const char*>> kMigrations = {
+      /* 0 -> 1: new store, nothing to change */ {},
+      /* 1 -> 2: locks remember their origin and work item */
+      {"ALTER TABLE lock ADD COLUMN origin TEXT NOT NULL DEFAULT ''",
+       "ALTER TABLE lock ADD COLUMN work TEXT NOT NULL DEFAULT ''"},
+  };
+  for (int v = version; v < kStoreVersion; ++v) {
+    for (const char* sql : kMigrations.at(v)) {
+      try {
+        exec(sql);
+      } catch (...) {  // already applied (a column a fresh schema created)
+      }
+    }
   }
-  exec("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')");
+  if (version != kStoreVersion)
+    exec(("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '" + std::to_string(kStoreVersion) + "')").c_str());
 }
 
 Store::~Store() { sqlite3_close(db_); }

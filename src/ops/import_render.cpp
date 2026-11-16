@@ -11,7 +11,8 @@ namespace {
 
 const std::set<std::string> kSkipDirs = {
     ".git", ".hs", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".eggs", ".idea", ".vs", "build", "dist"};
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".eggs", ".idea", ".vs", "build", "dist",
+    ".godot", ".import"};  // Godot 4 / Godot 3 editor caches (per-asset *.import files are kept)
 
 struct Ignore {
   std::vector<std::string> patterns;  // relative to the import root

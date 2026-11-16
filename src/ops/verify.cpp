@@ -62,7 +62,32 @@ std::string python_root(const fs::path& tree, const std::string& file) {
   return rel(n);
 }
 
+// The res:// path of a file inside the Godot project that contains it.
+std::string godot_res_path(const fs::path& tree, const std::string& file) {
+  fs::path dir = from_utf8(file).parent_path();
+  while (true) {
+    if (fs::exists(tree / dir / "project.godot")) {
+      std::string rel = to_generic(fs::relative(tree / from_utf8(file), tree / dir));
+      return "res://" + rel;
+    }
+    if (dir.empty() || dir == dir.parent_path()) break;
+    dir = dir.parent_path();
+  }
+  return "res://" + file;
+}
+
 std::string command_for(const Repo& repo, const std::string& lang, const std::vector<std::string>& nodes) {
+  if (lang == "gdscript") {
+    // nodes: "<res path>::<test>" (or just "<res path>" for the whole file)
+    std::string tmpl = repo.config().test_command_gdscript;
+    if (tmpl.empty() || nodes.empty()) return "";
+    std::string file = nodes[0].substr(0, nodes[0].find("::"));
+    std::string test = nodes.size() == 1 && nodes[0].find("::") != std::string::npos
+                           ? nodes[0].substr(nodes[0].find("::") + 2) : "";
+    for (auto [key, val] : {std::pair<std::string, std::string>{"{file}", file}, {"{tests}", test}})
+      for (size_t at; (at = tmpl.find(key)) != std::string::npos;) tmpl.replace(at, key.size(), val);
+    return tmpl;
+  }
   std::string tmpl = lang == "python" ? repo.config().test_command_python : "";
   if (tmpl.empty()) return "";
   std::string list;
@@ -203,12 +228,18 @@ nlohmann::json verify(Repo& repo, bool all) {
       // with node ids relative to that root.
       std::string root = rows[0]->lang == "python" ? python_root(tree, file) : "";
       fs::path dir = root.empty() ? tree : tree / from_utf8(root);
+      bool gd = rows[0]->lang == "gdscript";
       auto node_of = [&](const IndexRow* r) {
+        if (gd) return godot_res_path(tree, file) + "::" + r->qname.substr(r->qname.rfind('.') == std::string::npos
+                                                                                ? r->qname.find(':') + 1
+                                                                                : r->qname.rfind('.') + 1);
         std::string n = pytest_node(r->qname);
         return root.empty() ? n : n.substr(root.size() + 1);
       };
       std::vector<std::string> nodes;
-      for (auto* r : rows) nodes.push_back(node_of(r));
+      if (gd && rows.size() > 1) nodes.push_back(godot_res_path(tree, file));  // the whole file in one run
+      else
+        for (auto* r : rows) nodes.push_back(node_of(r));
       std::string cmd = command_for(repo, rows[0]->lang, nodes);
       if (cmd.empty()) {
         warnings.push_back({{"name", file}, {"problem", "no test command for " + rows[0]->lang}});

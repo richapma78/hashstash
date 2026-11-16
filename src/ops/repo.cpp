@@ -132,6 +132,7 @@ void Repo::load_config() {
     else if (key == "tests.require") config_.tests_require = unquote(val);
     else if (key == "work.requests") config_.requests_on_commit = unquote(val);
     else if (key == "tests.python") config_.test_command_python = unquote(val);
+    else if (key == "tests.gdscript") config_.test_command_gdscript = unquote(val);
     else if (key == "tests.impact_depth") num(config_.tests_impact_depth);
     else if (key == "history.keep") num(config_.history_keep);
     else if (key == "review.approval") config_.review_approval = unquote(val);

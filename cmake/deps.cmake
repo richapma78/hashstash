@@ -22,10 +22,13 @@ FetchContent_Declare(nljson
 FetchContent_Declare(ts_cpp
   URL https://github.com/tree-sitter/tree-sitter-cpp/archive/refs/tags/v0.23.4.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR _none_)
+FetchContent_Declare(ts_gdscript
+  URL https://github.com/PrestonKnopp/tree-sitter-gdscript/archive/refs/tags/v6.1.0.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR _none_)
 FetchContent_Declare(httplib
   URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.3.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR _none_)
-FetchContent_MakeAvailable(sqlite blake3 treesitter ts_python ts_cpp nljson httplib)
+FetchContent_MakeAvailable(sqlite blake3 treesitter ts_python ts_cpp ts_gdscript nljson httplib)
 
 # SQLite with full-text search
 add_library(hs_sqlite STATIC ${sqlite_SOURCE_DIR}/sqlite3.c)
@@ -48,13 +51,17 @@ add_library(hs_treesitter STATIC
   ${ts_python_SOURCE_DIR}/src/parser.c
   ${ts_python_SOURCE_DIR}/src/scanner.c
   ${ts_cpp_SOURCE_DIR}/src/parser.c
-  ${ts_cpp_SOURCE_DIR}/src/scanner.c)
+  ${ts_cpp_SOURCE_DIR}/src/scanner.c
+  ${ts_gdscript_SOURCE_DIR}/src/parser.c
+  ${ts_gdscript_SOURCE_DIR}/src/scanner.c)
 target_include_directories(hs_treesitter
   PUBLIC ${treesitter_SOURCE_DIR}/lib/include
   PRIVATE ${treesitter_SOURCE_DIR}/lib/src ${ts_python_SOURCE_DIR}/src)
-# Both grammars ship src/tree_sitter/parser.h; give each scanner its own.
+# Each grammar ships src/tree_sitter/parser.h; give each scanner its own.
 set_source_files_properties(${ts_cpp_SOURCE_DIR}/src/parser.c ${ts_cpp_SOURCE_DIR}/src/scanner.c
   PROPERTIES INCLUDE_DIRECTORIES ${ts_cpp_SOURCE_DIR}/src)
+set_source_files_properties(${ts_gdscript_SOURCE_DIR}/src/parser.c ${ts_gdscript_SOURCE_DIR}/src/scanner.c
+  PROPERTIES INCLUDE_DIRECTORIES ${ts_gdscript_SOURCE_DIR}/src)
 
 # cpp-httplib (header only) for hshub and hs sync
 add_library(hs_httplib INTERFACE)
