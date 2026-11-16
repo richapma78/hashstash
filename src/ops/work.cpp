@@ -210,7 +210,7 @@ int land_verified(Repo& repo) {
   std::vector<std::string> commits;
   for (auto& r : resolved)
     if (history.count(r.commit)) commits.push_back(r.commit);
-  return commits.empty() ? 0 : c->land(commits);
+  return commits.empty() ? 0 : c->land(commits, *head);
 }
 
 static std::string qname_of(Repo& repo, const Request& r) {
@@ -286,7 +286,7 @@ std::string describe_event(const Event& e) {
            (e.data.value("queued_for_lock", json()).is_null() ? "" : "; you are queued for the lock");
   if (e.kind == "request_cancelled") return id + ": " + r.requester + " cancelled the request on " + r.name;
   if (e.kind == "request_done")
-    return id + ": done. " + r.holder + " made your change to " + r.name + " in commit #" +
+    return id + ": done. " + r.holder + " made your change to " + r.name + "; your tests pass at commit #" +
            short_hash(e.data.value("commit", r.commit)) + " (pull to get it)";
   if (e.kind == "lock_granted") return id + ": you now hold the lock on " + r.name + " (" + e.data.value("note", "") + ")";
   return e.kind + ": " + e.data.dump();

@@ -239,7 +239,7 @@ json HubService::push(ProjectStore& p, const json& req, const Principal& who) {
   std::vector<std::string> landed;
   for (auto& c : ancestors(p, new_head))
     if (!known.count(c)) landed.push_back(c);
-  int done = p.coord().land(landed);
+  int done = p.coord().land(landed, new_head);
 
   // This agent's locks become the set it sent (released ones go to whoever queued).
   std::vector<LockRec> keep;

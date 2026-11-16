@@ -672,8 +672,15 @@ TEST(work_requests_local) {
     CHECK(wc.landed == 0);  // not done at commit: only once verify passes with its tests
     CHECK(coordination(*r)->request(rq.id)->status == "resolved");
     CHECK(!lock_on(*r, mul.lineage));
+    // The change is finished in a later commit; that is the one the tests pass at.
+    Namespace ns2 = r->work_ns();
+    auto e2 = replace_def(*r, ns2, mul.qname, "def mul(a, b):\n    # floats too\n    return a * b\n", "", "note");
+    commit_edits(*r, ns2, {&e2});
+    auto wc2 = commit_work(*r, "mul: note floats");
     CHECK(land_verified(*r) == 1);  // what a passing hs verify does (no hub)
-    CHECK(coordination(*r)->request(rq.id)->status == "done");
+    auto done = coordination(*r)->request(rq.id);
+    CHECK(done->status == "done");
+    CHECK(done->commit == wc2.result.commit && done->commit != wc.result.commit);
 
     r->set_agent("agent-b");
     auto ev = inbox(*r, true);

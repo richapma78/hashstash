@@ -197,7 +197,7 @@ void Workspace::save(const std::string& agent) {
     std::vector<std::string> landed;
     for (auto& c : anc)
       if (!before.count(c)) landed.push_back(c);
-    p_->coord().land(landed);
+    p_->coord().land(landed, mine);
     s.set_ref("hub/seen/" + b, mine);
   }
   std::string b = repo_->branch();

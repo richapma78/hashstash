@@ -119,8 +119,11 @@ class Coordination {
   // action: accept | decline | resolve (by the holder), cancel (by the requester).
   virtual Request update_request(long long id, const std::string& action, const std::string& actor,
                                  const std::string& note, const std::string& commit) = 0;
-  // These commits reached the shared branch: resolved requests they carry are done.
-  virtual int land(const std::vector<std::string>& commits) = 0;
+  // These commits reached the shared branch: resolved requests they carry are
+  // done. verified is the commit whose verify passed (the hub's new head, or
+  // the local head): the request records it, since the resolving commit may
+  // not hold the whole change (it can be finished in later commits).
+  virtual int land(const std::vector<std::string>& commits, const std::string& verified = "") = 0;
 
   // Events for agent (sent to it, or to a work item it owns) after seq.
   virtual std::vector<Event> events(const std::string& agent, long long after, int limit) = 0;

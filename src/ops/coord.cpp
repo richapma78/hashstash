@@ -397,7 +397,7 @@ class SqlCoordination : public Coordination {
     return r;
   }
 
-  int land(const std::vector<std::string>& commits) override {
+  int land(const std::vector<std::string>& commits, const std::string& verified = "") override {
     int n = 0;
     if (commits.empty()) return 0;
     s_.transaction([&] {
@@ -409,8 +409,10 @@ class SqlCoordination : public Coordination {
       }
       for (auto& r : resolved) {
         if (!set.count(r.commit)) continue;
-        set_status(r, "done", r.note, r.commit);
-        emit(r.requester, r.requester_work, "request_done", {{"request", r.to_json()}, {"commit", r.commit}});
+        std::string resolved_in = r.commit, done_in = verified.empty() ? r.commit : verified;
+        set_status(r, "done", r.note, done_in);
+        emit(r.requester, r.requester_work, "request_done",
+             {{"request", r.to_json()}, {"commit", done_in}, {"resolved_in", resolved_in}});
         ++n;
       }
     });
@@ -631,7 +633,7 @@ class HubCoordination : public Coordination {
     return Request::from_json(call("update_request", {{"id", id}, {"action", action}, {"actor", actor},
                                                       {"note", note}, {"commit", commit}})["request"]);
   }
-  int land(const std::vector<std::string>&) override {
+  int land(const std::vector<std::string>&, const std::string& = "") override {
     // Only the hub decides what reached its branches (on push).
     return 0;
   }
