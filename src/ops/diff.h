@@ -41,9 +41,10 @@ struct NamespaceDiff {
   std::vector<std::string> files_added, files_removed, files_glue_changed;
   std::vector<FileChange> module_changes;  // with text, for line diffs
   bool tests_changed = false;
+  bool git_ignore_changed = false;
   bool empty() const {
     return defs.empty() && files_added.empty() && files_removed.empty() &&
-           files_glue_changed.empty() && !tests_changed;
+           files_glue_changed.empty() && !tests_changed && !git_ignore_changed;
   }
 };
 

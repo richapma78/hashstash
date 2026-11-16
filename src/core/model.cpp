@@ -70,6 +70,7 @@ Hash put_namespace(Store& s, const Namespace& n) {
     if (!ts.empty()) tests[def] = ts;
   if (!tests.empty()) j["tests"] = tests;
   if (!n.attach.empty()) j["attach"] = n.attach;
+  if (!n.git_ignore.empty()) j["git_ignore"] = n.git_ignore;  // absent when empty: older hashes stay valid
   return s.put("namespace", j.dump());
 }
 
@@ -110,6 +111,7 @@ Namespace load_namespace(const Store& s, const Hash& h) {
   if (j.contains("tests"))
     n.tests = j["tests"].get<std::map<std::string, std::set<std::string>>>();
   if (j.contains("attach")) n.attach = j["attach"].get<std::map<std::string, Hash>>();
+  if (j.contains("git_ignore")) n.git_ignore = j["git_ignore"].get<std::map<std::string, std::string>>();
   return n;
 }
 

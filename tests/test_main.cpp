@@ -855,6 +855,46 @@ TEST(access_keys) {
   fs::remove_all(dir, ec);
 }
 
+// Git-ignore rules live in the namespace: committed and synced like code,
+// rendered locally, and left out (or removed) when publishing to git.
+TEST(git_ignore_rules) {
+  fs::path dir = temp_dir("gitignore");
+  {
+    auto r = Repo::init(dir / "p", "demo");
+    import_path(*r, fs::path(HS_FIXTURES) / "sample_project");
+    commit(*r, "import");
+    write_file(r->hs_dir() / "config.toml", read_file(r->hs_dir() / "config.toml") + "\n[publish]\ngit_dir = \"git-out\"\n");
+    auto r2 = Repo::open(r->root());
+    auto pub = publish(*r2);
+    fs::path out = r2->root() / "git-out";
+    CHECK(fs::exists(out / "tests" / "test_ops.py"));
+    Hash ns_before = r2->work_ns_hash();
+
+    CHECK(throws([&] { git_ignore_add(*r2, "tests/", ""); }));  // a reason is required
+    json added = git_ignore_add(*r2, "tests/", "test scaffolding stays internal");
+    CHECK(added["pattern"] == "tests" && !added["files"].empty());
+    CHECK(git_ignore_matches("*.env", "config/prod.env") && git_ignore_matches("config", "config/a/b.txt") &&
+          !git_ignore_matches("calc/x.py", "calc/x.pyc") && !git_ignore_matches("test", "tests/a.py"));
+    CHECK(r2->work_ns_hash() != ns_before);
+    auto c = commit(*r2, "keep tests out of git");
+    CHECK(load_commit(r2->store(), c.commit).changes.back() == "git-ignore rules changed");
+    CHECK(load_namespace(r2->store(), r2->work_ns_hash()).git_ignore.at("tests") == "test scaffolding stays internal");
+
+    auto pub2 = publish(*r2);
+    CHECK(pub2["changed"].get<bool>() && pub2["git_ignored"].get<int>() >= 1);
+    CHECK(!fs::exists(out / "tests" / "test_ops.py"));  // removed from the git branch
+    CHECK(fs::exists(out / "calc" / "ops.py"));
+    render_to(*r2, dir / "local");                       // a local render still has everything
+    CHECK(fs::exists(dir / "local" / "tests" / "test_ops.py"));
+
+    git_ignore_remove(*r2, "tests/");
+    CHECK(git_ignore_list(*r2).empty());
+    CHECK(r2->work_ns_hash() == ns_before);              // no rules: the same namespace hash as before
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST(roundtrip_corpus) {
   const char* dir = std::getenv("HS_ROUNDTRIP_DIR");
   if (!dir) return;

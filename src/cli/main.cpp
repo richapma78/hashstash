@@ -120,6 +120,9 @@ Hub (hshub)
   hs push [remote] [branch]           send verified commits (and your locks) to the hub
   hs pull [remote] [branch]           fast-forward from the hub (and receive its locks)
   hs publish [branch]                 render into the [publish] git working copy, commit, push
+  hs gitignore [list]                 paths kept in hashstash but never published to git
+  hs gitignore add <path|glob> --reason "..."   e.g. secrets/, *.env, config/local.toml
+  hs gitignore remove <pattern>       (rules are committed and synced like code)
   With remote "origin" set, locks are taken on the hub too (HS_OFFLINE=1 to skip).
 
 Agents
@@ -961,8 +964,37 @@ int cmd_publish(Repo& repo, const Args& a) {
   if (g_json) return out_json(r), 0;
   std::cout << "Published #" << r["commit"].get<std::string>() << " to " << r["dir"].get<std::string>() << ": "
             << r["written"] << " files written, " << r["deleted"] << " deleted"
+            << (r.value("git_ignored", 0) ? ", " + std::to_string(r.value("git_ignored", 0)) + " git-ignored" : "")
             << (r.contains("git_commit") ? ", git commit " + r["git_commit"].get<std::string>() : ", no changes")
             << (r.contains("pushed") ? ", pushed to " + r["pushed"].get<std::string>() : "") << ".\n";
+  return 0;
+}
+
+int cmd_gitignore(Repo& repo, const Args& a) {
+  std::string sub = a.pos.size() > 1 ? a.pos[1] : "list";
+  if (sub == "add") {
+    need(a, 3, "gitignore add <path or pattern> --reason \"why it stays out of git\"");
+    json r = git_ignore_add(repo, a.pos[2], a.get("--reason", a.get("-m")));
+    if (g_json) return out_json(r), 0;
+    std::cout << "Git-ignoring " << r["pattern"].get<std::string>() << " (" << r["files"].size()
+              << " file(s) now). It stays in hashstash and on the hub; publishing leaves it out of git.\n"
+              << "Commit to keep the rule: hs commit -m \"...\"\n";
+    return 0;
+  }
+  if (sub == "remove") {
+    need(a, 3, "gitignore remove <pattern>");
+    git_ignore_remove(repo, a.pos[2]);
+    std::cout << "Removed the rule; the next publish includes those files again. Commit to keep it.\n";
+    return 0;
+  }
+  if (sub != "list") throw std::runtime_error("usage: hs gitignore [list] | add <pattern> --reason \"...\" | remove <pattern>");
+  json r = git_ignore_list(repo);
+  if (g_json) return out_json(r), 0;
+  if (r.empty()) std::cout << "Nothing is git-ignored: every file is published.\n";
+  for (auto& x : r) {
+    std::cout << x["pattern"].get<std::string>() << "  - " << x["reason"].get<std::string>() << "\n";
+    for (auto& f : x["files"]) std::cout << "    " << f.get<std::string>() << "\n";
+  }
   return 0;
 }
 
@@ -1218,6 +1250,7 @@ int main(int argc, char** argv) {
     if (cmd == "push") return cmd_push(*repo, a);
     if (cmd == "pull") return cmd_pull(*repo, a);
     if (cmd == "publish") return cmd_publish(*repo, a);
+    if (cmd == "gitignore") return cmd_gitignore(*repo, a);
     if (cmd == "mcp") {
 #ifdef _WIN32
       _setmode(_fileno(stdout), _O_BINARY);

@@ -194,6 +194,7 @@ std::string changes_html(Repo& repo, const std::string& project, const Namespace
   for (auto& f : d.files_added) o += "<div>" + badge("good", "new file") + " <code>" + esc(f) + "</code></div>";
   for (auto& f : d.files_removed) o += "<div>" + badge("bad", "deleted file") + " <code>" + esc(f) + "</code></div>";
   if (d.tests_changed) o += "<div>" + badge("muted", "test links changed") + "</div>";
+  if (d.git_ignore_changed) o += "<div>" + badge("muted", "git-ignore rules changed") + "</div>";
   const size_t limit = 150;
   size_t shown = 0;
   for (auto& c : d.defs) {

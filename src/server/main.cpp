@@ -84,7 +84,8 @@ const std::set<std::string> kReadTools = {"hs_status", "hs_find", "hs_list", "hs
 std::string mcp_refusal(Access& access, const std::string& project, const Principal& who, Repo& repo,
                         const std::string& tool, const json& args) {
   bool reads = kReadTools.count(tool) ||
-               (tool == "hs_work" && (args.value("action", "status") == "status" || args.value("action", "") == "list"));
+               (tool == "hs_work" && (args.value("action", "status") == "status" || args.value("action", "") == "list")) ||
+               (tool == "hs_git_ignore" && args.value("action", "list") == "list");
   if (reads) return "";
   if (who.role.empty())
     return access.required(project) ? "project " + project + " needs an access key to change anything: send your "

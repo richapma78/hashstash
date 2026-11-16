@@ -468,6 +468,19 @@ to a dedicated branch such as `nightly`, and put `hshub publish` on a schedule
 (Task Scheduler, cron) if you want one commit per day instead. Keep `main` for
 releases you choose to promote.
 
+**Keeping things out of git.** Some files belong in hashstash but not on GitHub: local
+settings, internal notes, scratch tools, test data. `hs gitignore add <path|glob>
+--reason "..."` (MCP `hs_git_ignore`) records a rule in the namespace itself, next to
+the files and test links. It is committed, pushed and pulled like code, so every agent
+and the hub's publisher see the same rules, and the review pages show when they change.
+Patterns work like `.gitignore`: `secrets/` or `secrets` (a folder and everything in
+it), `config/local.toml`, `*.env` (no slash: matches at any depth),
+`tools/**/scratch_*.py`. Publishing leaves matching files out of the git working copy,
+and a file published before it was ignored is removed from the branch on the next
+publish. Git history that was already pushed still has it, so rotate any secret that
+was published. `hs render` still writes everything, because a local build needs it.
+A namespace without rules has no `git_ignore` key, so older hashes are unchanged.
+
 ## 9. Commands (`hs`)
 
 ```
@@ -514,6 +527,8 @@ hs clone <url> [dir]             copy a hub project into a new local store
 hs push [remote]                 verified, fast-forward push; carries locks
 hs pull [remote]                 fast-forward pull; brings hub locks down
 hs publish [branch]              render and commit to the [publish] git repository
+hs gitignore [list] / add <pattern> --reason ... / remove <pattern>
+                                 paths kept in hashstash but never published to git
 
 Later milestones:
 hs branch / switch / merge
@@ -546,7 +561,7 @@ The same tool set is served by `hs mcp` (stdio, local project) and by `hshub`
 `hs_link_tests`, `hs_unlink_tests`, `hs_missing_tests`, `hs_note`, `hs_why`, `hs_diff`,
 `hs_verify`, `hs_commit`, `hs_show`, `hs_review`, `hs_reviews`, `hs_test_summary`,
 `hs_log`, `hs_history`, `hs_rollback`, `hs_render`, `hs_remotes`, `hs_pull`,
-`hs_push`, `hs_publish`.
+`hs_push`, `hs_publish`, `hs_git_ignore`.
 Coming with later milestones: `hs_fragment`, `hs_merge`.
 
 An agent with only the local MCP server can therefore do the whole cycle: edit,

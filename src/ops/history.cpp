@@ -29,6 +29,7 @@ CommitResult commit(Repo& repo, const std::string& message, bool keep_locks) {
   for (auto& f : res.diff.files_removed) c.changes.push_back("deleted file " + f);
   for (auto& f : res.diff.files_glue_changed) c.changes.push_back("module code " + f);
   if (res.diff.tests_changed) c.changes.push_back("test links changed");
+  if (res.diff.git_ignore_changed) c.changes.push_back("git-ignore rules changed");
 
   s.transaction([&] {
     res.commit = put_commit(s, c);

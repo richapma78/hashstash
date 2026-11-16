@@ -58,6 +58,9 @@ struct Namespace {
   std::map<std::string, std::set<std::string>> tests;
   // Comment regions and context history per definition: lineage -> attach object.
   std::map<std::string, Hash> attach;
+  // Paths kept in hashstash (and on the hub) but never published to git:
+  // glob pattern -> why. See ops/publish.h.
+  std::map<std::string, std::string> git_ignore;
 };
 
 // A comment about a region of a definition, kept beside the code, not in it.

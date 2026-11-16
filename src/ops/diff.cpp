@@ -226,6 +226,7 @@ NamespaceDiff diff_namespaces(const Store& s, const Namespace& a, const Namespac
   for (auto& f : fa)
     if (!by_lineage_b.count(f.lineage)) d.defs.push_back({"removed", f.qname, "", f.hash, "", f.lineage});
   d.tests_changed = a.tests != b.tests;
+  d.git_ignore_changed = a.git_ignore != b.git_ignore;
   return d;
 }
 
@@ -270,7 +271,8 @@ nlohmann::json diff_to_json(const Store& s, const NamespaceDiff& d, bool with_te
                         {"files_added", d.files_added},
                         {"files_removed", d.files_removed},
                         {"module_code_changed", d.files_glue_changed},
-                        {"test_links_changed", d.tests_changed}};
+                        {"test_links_changed", d.tests_changed},
+                        {"git_ignore_changed", d.git_ignore_changed}};
   if (with_text && !d.module_changes.empty()) {
     nlohmann::json mods = nlohmann::json::array();
     for (auto& m : d.module_changes) {
@@ -322,6 +324,7 @@ std::string diff_to_text(const Store& s, const NamespaceDiff& d, bool with_text)
     for (auto& f : d.files_glue_changed) out += "  module code   " + f + "\n";
   }
   if (d.tests_changed) out += "  test links changed\n";
+  if (d.git_ignore_changed) out += "  git-ignore rules changed\n";
   return out;
 }
 

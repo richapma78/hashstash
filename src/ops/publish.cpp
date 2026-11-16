@@ -6,6 +6,60 @@
 
 namespace hs {
 
+std::string normalize_git_ignore(const std::string& in) {
+  std::string p = trim(in);
+  for (char& c : p)
+    if (c == '\\') c = '/';
+  while (starts_with(p, "./")) p = p.substr(2);
+  while (!p.empty() && p.front() == '/') p.erase(0, 1);
+  while (!p.empty() && p.back() == '/') p.pop_back();
+  if (p.empty()) throw std::runtime_error("a git-ignore rule needs a path or pattern, e.g. secrets/ or *.env");
+  return p;
+}
+
+bool git_ignore_matches(const std::string& p, const std::string& path) {
+  if (glob_match(p, path) || glob_match(p + "/**", path)) return true;
+  // No slash: a name at any depth, as in .gitignore.
+  return p.find('/') == std::string::npos && (glob_match("**/" + p, path) || glob_match("**/" + p + "/**", path));
+}
+
+bool git_ignored(const Namespace& ns, const std::string& path) {
+  for (auto& [p, why] : ns.git_ignore)
+    if (git_ignore_matches(p, path)) return true;
+  return false;
+}
+
+static nlohmann::json rule_json(const Namespace& ns, const std::string& p, const std::string& why) {
+  nlohmann::json files = nlohmann::json::array();
+  for (auto& [path, e] : ns.files)
+    if (git_ignore_matches(p, path)) files.push_back(path);
+  return {{"pattern", p}, {"reason", why}, {"files", files}};
+}
+
+nlohmann::json git_ignore_list(Repo& repo) {
+  Namespace ns = repo.work_ns();
+  nlohmann::json out = nlohmann::json::array();
+  for (auto& [p, why] : ns.git_ignore) out.push_back(rule_json(ns, p, why));
+  return out;
+}
+
+nlohmann::json git_ignore_add(Repo& repo, const std::string& pattern, const std::string& reason) {
+  if (trim(reason).empty())
+    throw std::runtime_error("say why it stays out of git (--reason), so other agents know");
+  std::string p = normalize_git_ignore(pattern);
+  Namespace ns = repo.work_ns();
+  ns.git_ignore[p] = trim(reason);
+  repo.set_work_ns(ns, "git-ignore", "git-ignore " + p);
+  return rule_json(ns, p, trim(reason));
+}
+
+void git_ignore_remove(Repo& repo, const std::string& pattern) {
+  std::string p = normalize_git_ignore(pattern);
+  Namespace ns = repo.work_ns();
+  if (!ns.git_ignore.erase(p)) throw std::runtime_error("no git-ignore rule " + p);
+  repo.set_work_ns(ns, "git-ignore", "stop git-ignoring " + p);
+}
+
 bool publish_on_push(const Repo& repo) {
   return repo.config().publish_on_push && !repo.config().publish_git_dir.empty();
 }
@@ -51,7 +105,8 @@ nlohmann::json publish(Repo& repo, const std::string& branch_in) {
   }
 
   Hash ns = load_commit(s, *head).ns;
-  RenderResult rr = render_to(repo, dir, ns);
+  Namespace tree = load_namespace(s, ns);
+  RenderResult rr = render_to(repo, dir, ns, [&](const std::string& path) { return git_ignored(tree, path); });
 
   // Commit message: the hashstash commits since the last publish.
   std::string last = s.ref("publish/" + branch).value_or("");
@@ -69,7 +124,7 @@ nlohmann::json publish(Repo& repo, const std::string& branch_in) {
   must(git(dir, "add -A"), "git add");
   bool changed = git(dir, "diff --cached --quiet").code != 0;
   nlohmann::json out = {{"commit", short_hash(*head)}, {"dir", to_generic(dir)}, {"written", rr.written},
-                        {"deleted", rr.deleted}, {"changed", changed}};
+                        {"deleted", rr.deleted}, {"git_ignored", rr.ignored}, {"changed", changed}};
   if (changed) {
     must(git(dir, "-c user.name=hashstash -c user.email=hashstash@localhost commit -q -F " +
                       shell_quote((repo.hs_dir() / "publish-message.txt").string())),

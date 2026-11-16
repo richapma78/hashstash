@@ -230,6 +230,13 @@ json McpServer::tool_list() {
       tool("hs_push", "Send verified commits to the hub (run hs_verify and hs_commit first). Your locks travel with it.",
            {{"remote", prop("string", "Remote name (default 'origin')")}}),
       tool("hs_remotes", "Configured hubs (remotes)."),
+      tool("hs_git_ignore",
+           "Keep paths in hashstash but out of git: list the rules, add one (a path, folder or glob such as "
+           "secrets/, *.env, config/local.toml; a reason is required) or remove one. Rules are committed and "
+           "synced like code; publishing to git leaves matching files out.",
+           {{"action", prop("string", "list (default) | add | remove")},
+            {"pattern", prop("string", "Path, folder or glob")},
+            {"reason", prop("string", "Why it stays out of git (add)")}}),
       tool("hs_publish", "Render the branch into the configured git working copy, commit and push it to git.",
            {{"branch", prop("string", "Branch (default: current)")}}),
   });
@@ -538,6 +545,20 @@ json McpServer::call_tool(const std::string& t, const json& a) {
     return out;
   }
   if (t == "hs_publish") return publish(r, a.value("branch", ""));
+  if (t == "hs_git_ignore") {
+    std::string act = a.value("action", "list");
+    if (act == "list") return {{"rules", git_ignore_list(r)}};
+    if (act == "add") {
+      json res = git_ignore_add(r, need_str(a, "pattern"), a.value("reason", ""));
+      res["next"] = "commit to keep the rule (hs_commit)";
+      return res;
+    }
+    if (act == "remove") {
+      git_ignore_remove(r, need_str(a, "pattern"));
+      return {{"removed", normalize_git_ignore(need_str(a, "pattern"))}, {"next", "commit to keep the change"}};
+    }
+    throw std::runtime_error("action is list, add or remove");
+  }
   throw std::runtime_error("unknown tool " + t);
 }
 

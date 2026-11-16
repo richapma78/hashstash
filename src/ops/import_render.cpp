@@ -121,7 +121,8 @@ ImportResult import_path(Repo& repo, const fs::path& src_in, const std::string& 
   return res;
 }
 
-RenderResult render_to(Repo& repo, const fs::path& out_in, const Hash& ns_hash) {
+RenderResult render_to(Repo& repo, const fs::path& out_in, const Hash& ns_hash,
+                       const std::function<bool(const std::string& path)>& skip) {
   RenderResult res;
   Store& s = repo.store();
   Namespace ns = load_namespace(s, ns_hash.empty() ? repo.work_ns_hash() : ns_hash);
@@ -140,6 +141,10 @@ RenderResult render_to(Repo& repo, const fs::path& out_in, const Hash& ns_hash) 
     del.bind(1, key).run();
     Stmt add(s.db(), "INSERT INTO render_manifest(out_dir, path, hash) VALUES (?, ?, ?)");
     for (auto& [path, e] : ns.files) {
+      if (skip && skip(path)) {
+        ++res.ignored;
+        continue;
+      }
       fs::path target = out / from_utf8(path);
       std::string bytes = render_entry(s, e);
       bool same = false;
@@ -156,7 +161,7 @@ RenderResult render_to(Repo& repo, const fs::path& out_in, const Hash& ns_hash) 
       add.reset();
     }
     for (auto& [path, h] : previous) {
-      if (ns.files.count(path)) continue;
+      if (ns.files.count(path) && !(skip && skip(path))) continue;
       std::error_code ec;
       if (fs::remove(out / from_utf8(path), ec)) ++res.deleted;
     }
