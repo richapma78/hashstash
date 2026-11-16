@@ -613,6 +613,21 @@ tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub
    same interfaces.
 7. **Graphical editor.** Shows the store as readable code with live graphs, edits through the same library.
 
+### Possible additions (not scheduled)
+
+* **Deeper Python coverage.** Track more Python code as individual definitions: module
+  constants and assignments, nested functions, `if __name__ == "__main__"` blocks, type
+  aliases, `@overload` groups; plus a coverage report per language showing what is
+  tracked as definitions and what stays module code.
+* **Python client library.** A pip-installable `hashstash` package so Python agents and
+  scripts can use a hub directly (projects, locks, edits, requests, commit, push, inbox)
+  without the `hs` command.
+* **Python bindings.** The C++ core callable from Python: open a local store, query
+  definitions and the call graph, edit and commit.
+* **Hub discovery for agents.** A hub-wide MCP endpoint (`/mcp`) with tools to list and
+  create projects, registered once in an agent's user-level MCP settings so every
+  session finds the hub; optionally start the hub at logon.
+
 ## License
 
 hashstash is free for noncommercial use under the PolyForm Noncommercial License 1.0.0
