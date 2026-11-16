@@ -42,6 +42,12 @@ minutes = 15      # a lock expires unless renewed within this time
 require = "warn"  # every function/method needs linked test cases: off | warn | block
 # exempt = ["__repr__", "_*"]   # short names that need no tests
 python = "python -m pytest -q {tests}"   # how hs verify runs Python tests
+# C/C++: build once in the generated tree (.hs/verify/tree), then run the test
+# binary with {tests} = the tests to run (GoogleTest "Suite.Name", Catch2/doctest
+# the TEST_CASE name, a plain function its name), joined by cpp_join and quoted.
+# cpp_build = "cmake -S . -B ../build -G Ninja && cmake --build ../build"
+# cpp       = "..\build\unit_tests.exe --gtest_filter={tests}"
+# cpp_join  = ":"   # default ":" if cpp mentions gtest, else ","
 impact_depth = 3  # verify also runs the tests of callers up to this many levels away (0 = off)
 
 [history]
@@ -133,6 +139,9 @@ void Repo::load_config() {
     else if (key == "work.requests") config_.requests_on_commit = unquote(val);
     else if (key == "tests.python") config_.test_command_python = unquote(val);
     else if (key == "tests.gdscript") config_.test_command_gdscript = unquote(val);
+    else if (key == "tests.cpp") config_.test_command_cpp = unquote(val);
+    else if (key == "tests.cpp_build") config_.test_build_cpp = unquote(val);
+    else if (key == "tests.cpp_join") config_.test_join_cpp = unquote(val);
     else if (key == "tests.impact_depth") num(config_.tests_impact_depth);
     else if (key == "history.keep") num(config_.history_keep);
     else if (key == "review.approval") config_.review_approval = unquote(val);

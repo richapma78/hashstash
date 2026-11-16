@@ -156,6 +156,55 @@ static bool roundtrip_file(Store& s, const std::string& path, const std::string&
   return render_entry(s, e) == bytes;
 }
 
+// Test framework macros (GoogleTest, Catch2, doctest, Boost.Test) become test
+// functions named after the macro and its arguments.
+TEST(cpp_test_macros) {
+  const Language* cpp = language_by_name("cpp");
+  std::string src =
+      "#include <gtest/gtest.h>\n"
+      "\n"
+      "TEST(MathTest, Add) {\n  EXPECT_EQ(add(1, 2), 3);\n}\n"
+      "\n"
+      "TEST_F(Fixture, Mul) { EXPECT_EQ(mul(2, 3), 6); }\n"
+      "\n"
+      "// Adds things.\n"
+      "TEST_CASE(\"adds {1.5}: yes\", \"[math]\")\n{\n  REQUIRE(add(1, 2) == 3);\n}\n"
+      "\n"
+      "SCENARIO(\"vectors grow\") {\n  GIVEN(\"a vector\") { WHEN(\"pushed\") { THEN(\"bigger\") {} } }\n}\n"
+      "\n"
+      "BOOST_AUTO_TEST_CASE(boost_case) {\n  BOOST_CHECK(true);\n}\n"
+      "\n"
+      "class URL {\n  URL() {}\n};\n"
+      "\n"
+      "static void helper() {}\n";
+  auto chunks = cpp->split(src);
+  std::vector<std::string> names;
+  for (auto& c : chunks) names.push_back(c.kind + " " + c.name);
+  CHECK((names == std::vector<std::string>{"function TEST(MathTest,Add)", "function TEST_F(Fixture,Mul)",
+                                          "function TEST_CASE(adds_{1_5}__yes)", "function SCENARIO(vectors_grow)",
+                                          "function BOOST_AUTO_TEST_CASE(boost_case)", "class URL",
+                                          "function helper"}));
+  if (chunks.size() == 7) {
+    CHECK(chunks[5].children.size() == 1 && chunks[5].children[0].name == "URL");  // a constructor, not a macro
+    std::string tc = src.substr(chunks[2].begin, chunks[2].end - chunks[2].begin);
+    CHECK(starts_with(tc, "// Adds things.\nTEST_CASE(") && ends_with(tc, "}\n"));  // comment and block included
+    CHECK(cpp->analyze(tc).signature == "TEST_CASE(\"adds {1.5}: yes\", \"[math]\")");
+  }
+  CHECK(is_test_def("src/math_test.cpp", "src/math_test.cpp:TEST(MathTest,Add)"));
+  CHECK(is_test_def("src/math.cpp", "src/math.cpp:TEST_CASE(adds)"));  // a test wherever it is
+  CHECK(is_test_def("tests/a.cpp", "tests/a.cpp:SCENARIO(x)"));
+  CHECK(!is_test_def("tests/a.cpp", "tests/a.cpp:helper"));
+  CHECK(!is_test_def("src/a.cpp", "src/a.cpp:URL.URL"));
+  CHECK(is_test_file("src/math_tests.cpp"));
+  fs::path dir = temp_dir("cppmacros");
+  {
+    Store s(to_generic(dir / "store.db"));
+    CHECK(roundtrip_file(s, "t.cpp", src));
+    CHECK(roundtrip_file(s, "test_math.cpp", read_file(fs::path(HS_FIXTURES) / "cpp_tests" / "tests" / "test_math.cpp")));
+  }
+  fs::remove_all(dir);
+}
+
 TEST(roundtrip_fixtures) {
   fs::path dir = temp_dir("rt");
   {
@@ -288,6 +337,75 @@ TEST(verify_runs_python_tests) {
       CHECK(sums["calc/ops.py:add"].failed >= 1);
       CHECK(sums["calc/ops.py:add"].label().find("failed") != std::string::npos);
     }
+  }
+  fs::remove_all(dir);
+}
+
+// [tests] cpp_build compiles the generated tree once, then [tests] cpp runs the
+// test binary filtered to the tests verify picked, named as the framework
+// knows them ("Math.Add", "mul, by adding").
+TEST(verify_runs_cpp_tests) {
+  if (run_command(fs::current_path(), "g++ --version").code != 0) {
+    std::cerr << "  (skipped: g++ not available)\n";
+    return;
+  }
+  fs::path dir = temp_dir("verifycpp");
+  auto set_tests = [&](const std::string& build) {
+    std::string cfg = read_file(dir / ".hs" / "config.toml");
+#ifdef _WIN32
+    std::string run = ".\\cpp_tests.exe {tests}";  // cmd may not search the current folder
+#else
+    std::string run = "./cpp_tests.exe {tests}";
+#endif
+    write_file(dir / ".hs" / "config.toml", cfg + "\n[tests]\ncpp_build = \"" + build + "\"\ncpp = \"" + run + "\"\n");
+    return Repo::open(dir);
+  };
+  {
+    auto repo = Repo::init(dir, "t");
+    import_path(*repo, fs::path(HS_FIXTURES) / "cpp_tests");
+    autolink_tests(*repo);
+    commit(*repo, "import");
+  }
+  {
+    auto repo = set_tests("g++ -std=c++17 -o cpp_tests.exe tests/test_math.cpp");
+    auto r = verify(*repo, false);
+    if (r["status"] != "passed") std::cerr << r.dump(2) << "\n";
+    CHECK(r["status"] == "passed");
+    std::set<std::string> ran;
+    for (auto& t : r["tests_run"]) ran.insert(t["test"].get<std::string>());
+    CHECK((ran == std::set<std::string>{"tests/test_math.cpp:TEST(Math,Add)", "tests/test_math.cpp:TEST(Math,Neg)",
+                                        "tests/test_math.cpp:TEST_CASE(mul,_by_adding)"}));
+    repo->store().set_ref("remote/origin/main", *repo->head_commit());
+
+    // Break add: its test fails, and so does mul's, which calls it; neg's
+    // test isn't run.
+    Namespace ns = repo->work_ns();
+    IndexRow add = resolve_name(*repo, "mathlib.h:add");
+    auto o = replace_def(*repo, ns, add.qname, "inline int add(int a, int b) {\n  return a - b;\n}\n",
+                         short_hash(add.hash), "break");
+    CHECK(o.ok);
+    commit_edits(*repo, ns, {&o});
+    commit(*repo, "break add");
+    auto bad = verify(*repo, false);
+    std::map<std::string, std::string> status;
+    for (auto& t : bad["tests_run"]) status[t["test"].get<std::string>()] = t["status"].get<std::string>();
+    if (status.size() != 2) std::cerr << bad.dump(2) << "\n";
+    CHECK(bad["status"] == "failed");
+    CHECK(status["tests/test_math.cpp:TEST(Math,Add)"] == "failed");
+    CHECK(status["tests/test_math.cpp:TEST_CASE(mul,_by_adding)"] == "failed");
+    CHECK(!status.count("tests/test_math.cpp:TEST(Math,Neg)"));
+  }
+  {
+    // A failed build fails every C++ test, with the build's output.
+    auto repo = set_tests("g++ -std=c++17 -o cpp_tests.exe tests/no_such_file.cpp");
+    auto r = verify(*repo, true);
+    CHECK(r["status"] == "failed");
+    bool build_failure = false;
+    for (auto& f : r["failures"]) build_failure = build_failure || f["name"] == "[tests] cpp_build";
+    CHECK(build_failure);
+    CHECK(r["tests_run"].size() == 3);
+    for (auto& t : r["tests_run"])
+      CHECK(t["status"] == "failed" && t["output"].get<std::string>().find("C++ build failed") != std::string::npos);
   }
   fs::remove_all(dir);
 }

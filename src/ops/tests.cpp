@@ -19,13 +19,27 @@ bool is_test_file(const std::string& file) {
   std::string b = basename(file);
   if (starts_with(b, "test_") || b == "conftest.py") return true;
   size_t dot = b.rfind('.');
-  if (dot != std::string::npos && ends_with(b.substr(0, dot), "_test")) return true;
+  if (dot != std::string::npos && (ends_with(b.substr(0, dot), "_test") || ends_with(b.substr(0, dot), "_tests")))
+    return true;
   std::string f = "/" + file;
   return f.find("/tests/") != std::string::npos || f.find("/test/") != std::string::npos;
 }
 
+// A C/C++ body written with a test framework's macro, as the C++ adapter
+// names it: "TEST(Suite,Name)", "TEST_F(...)", "TEST_CASE(...)",
+// "SCENARIO(...)", "BOOST_AUTO_TEST_CASE(...)". A test wherever it lives.
+static bool is_test_macro(const std::string& s) {
+  size_t paren = s.find('(');
+  if (paren == std::string::npos || paren == 0 || s.back() != ')') return false;
+  std::string macro = s.substr(0, paren);
+  for (char c : macro)
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return false;
+  return macro.find("TEST") != std::string::npos || starts_with(macro, "SCENARIO");
+}
+
 bool is_test_def(const std::string& file, const std::string& qname) {
-  return is_test_file(file) && starts_with(short_of(qname), "test");
+  std::string s = short_of(qname);
+  return is_test_macro(s) || (is_test_file(file) && starts_with(s, "test"));
 }
 
 bool needs_tests(const Config& c, const std::string& file, const std::string& qname,
@@ -34,6 +48,7 @@ bool needs_tests(const Config& c, const std::string& file, const std::string& qn
   if (kind != "function" && kind != "method") return false;
   if (is_test_file(file)) return false;
   std::string s = short_of(qname);
+  if (is_test_macro(s)) return false;
   for (auto& p : c.tests_exempt)
     if (glob_match(p, s)) return false;
   return true;

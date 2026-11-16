@@ -1,7 +1,10 @@
 // C and C++ adapter (tree-sitter-cpp parses both). Definitions: functions
 // (including out-of-class methods "Store::put"), classes/structs/unions/enums,
 // typedefs of those, and namespaces as containers. Methods defined inside a
-// class body become its children. Preprocessor conditionals are looked
+// class body become its children. Bodies written with a macro, as test
+// frameworks do (GoogleTest TEST(Suite, Name), Catch2 / doctest
+// TEST_CASE("name"), Boost BOOST_AUTO_TEST_CASE(name)), are functions named
+// after the macro and its arguments: "TEST(Suite,Name)", "TEST_CASE(adds_up)". Preprocessor conditionals are looked
 // through, so include guards and #ifdef blocks don't hide definitions; the
 // directive lines themselves stay glue.
 #include <tree_sitter/api.h>
@@ -67,6 +70,58 @@ std::string function_name(TSNode decl, std::string_view src) {
   return "";
 }
 
+// An all-caps identifier such as TEST or BOOST_AUTO_TEST_CASE.
+bool is_macro_name(std::string_view s) {
+  bool letter = false;
+  for (char c : s) {
+    if (c >= 'A' && c <= 'Z') letter = true;
+    else if (!(c >= '0' && c <= '9') && c != '_') return false;
+  }
+  return letter && s.size() >= 2;
+}
+
+// "TEST(Suite,Name)" from a macro and its argument list: identifiers as
+// written, the first string literal's text (later ones are Catch2 tags), and
+// characters a qualified name can't hold (. : ~ spaces quotes) as "_".
+std::string macro_def_name(std::string_view macro, TSNode args, std::string_view src) {
+  std::string name(macro);
+  name += '(';
+  bool first = true, had_string = false;
+  uint32_t c = ts_node_named_child_count(args);
+  for (uint32_t i = 0; i < c; ++i) {
+    TSNode a = ts_node_named_child(args, i);
+    if (is(a, "comment")) continue;
+    std::string t;
+    if (is(a, "string_literal") || is(a, "raw_string_literal")) {
+      if (had_string) continue;
+      had_string = true;
+      std::string_view raw = text_of(a, src);
+      size_t q1 = raw.find('"'), q2 = raw.rfind('"');
+      t = q1 != std::string_view::npos && q2 > q1 ? std::string(raw.substr(q1 + 1, q2 - q1 - 1)) : std::string(raw);
+    } else {
+      t = collapse_ws(text_of(a, src));
+    }
+    for (char& ch : t)
+      if (ch == '.' || ch == ':' || ch == '~' || ch == ' ' || ch == '\t' || ch == '"' || ch == '\'') ch = '_';
+    name += (first ? "" : ",") + t;
+    first = false;
+  }
+  return name + ')';
+}
+
+// A macro call written as a body's head: "TEST_CASE("x") { ... }" parses as
+// a call statement (missing its ";") followed by a block. The macro's name,
+// or "" if st isn't one.
+std::string macro_call_head(TSNode st, std::string_view src, TSNode* args) {
+  if (!is(st, "expression_statement") || ts_node_named_child_count(st) != 1) return "";
+  TSNode call = ts_node_named_child(st, 0);
+  if (!is(call, "call_expression")) return "";
+  TSNode fn = field(call, "function");
+  if (ts_node_is_null(fn) || !is(fn, "identifier") || !is_macro_name(text_of(fn, src))) return "";
+  *args = field(call, "arguments");
+  return ts_node_is_null(*args) ? "" : std::string(text_of(fn, src));
+}
+
 struct Found {
   std::string kind, name;
   TSNode body{};  // container body to descend into (class field list / namespace body)
@@ -86,6 +141,14 @@ bool definition(TSNode n, std::string_view src, bool in_class, Found& f) {
   if (is(n, "function_definition")) {
     f.name = function_name(field(n, "declarator"), src);
     if (f.name.empty()) return false;
+    // TEST(Suite, Name) { ... }: no return type, an all-caps "function".
+    TSNode d = field(n, "declarator");
+    if (!in_class && ts_node_is_null(field(n, "type")) && is(d, "function_declarator") &&
+        is_macro_name(f.name) && !ts_node_is_null(field(d, "parameters"))) {
+      f.name = macro_def_name(f.name, field(d, "parameters"), src);
+      f.kind = "function";
+      return true;
+    }
     f.kind = in_class || f.name.find("::") != std::string::npos ? "method" : "function";
     return true;
   }
@@ -167,9 +230,18 @@ class Cpp : public Language {
       long long prev_end = -1;
       for (size_t i = 0; i < stmts.size(); ++i) {
         TSNode st = stmts[i];
+        size_t head = i;  // first statement of the definition (a macro body spans two)
         Found f;
         uint32_t first = ts_node_start_point(st).row, last = last_row(st);
-        if (!definition(st, src, in_class, f)) {
+        TSNode margs{};
+        std::string macro = in_class ? "" : macro_call_head(st, src, &margs);
+        bool macro_body = !macro.empty() && i + 1 < stmts.size() && is(stmts[i + 1], "compound_statement") &&
+                          ts_node_start_point(stmts[i + 1]).row <= last + 1;
+        if (macro_body) {
+          f.kind = "function";
+          f.name = macro_def_name(macro, margs, src);
+          last = last_row(stmts[++i]);  // the block is part of it
+        } else if (!definition(st, src, in_class, f)) {
           if (!is(st, "comment")) prev_end = std::max<long long>(prev_end, last);
           continue;
         }
@@ -185,7 +257,7 @@ class Cpp : public Language {
           continue;
         }
         uint32_t top = first;
-        for (long long j = (long long)i - 1; j >= 0; --j) {
+        for (long long j = (long long)head - 1; j >= 0; --j) {
           TSNode c = stmts[(size_t)j];
           if (!is(c, "comment")) break;
           uint32_t crow = ts_node_start_point(c).row;
@@ -253,6 +325,19 @@ class Cpp : public Language {
     };
     visit(t.root());
     a.norm = hash_bytes("norm", tokens);
+    if (!sig_done) {  // a macro body: its head, 'TEST_CASE("adds {1}")'
+      uint32_t c = ts_node_named_child_count(t.root());
+      for (uint32_t i = 0; i < c; ++i) {
+        TSNode k = ts_node_named_child(t.root(), i);
+        if (is(k, "comment")) continue;
+        TSNode args{};
+        if (!macro_call_head(k, text, &args).empty()) {
+          a.signature = collapse_ws(text_of(ts_node_named_child(k, 0), text));
+          sig_done = true;
+        }
+        break;
+      }
+    }
     if (!sig_done) {
       // Records: "class Foo : public Bar"
       size_t brace = text.find('{');

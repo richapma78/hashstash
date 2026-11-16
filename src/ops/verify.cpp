@@ -78,7 +78,88 @@ std::string godot_res_path(const fs::path& tree, const std::string& file) {
   return "res://" + file;
 }
 
+// The name a C/C++ test framework filters by, from the test's signature:
+//   TEST(Suite, Name), TEST_F(...)        -> Suite.Name     (GoogleTest)
+//   TEST_P(Suite, Name)                   -> */Suite.Name/*
+//   TYPED_TEST(Suite, Name)               -> Suite/*.Name
+//   TYPED_TEST_P(Suite, Name)             -> */Suite/*.Name
+//   TEST_CASE("adds up", "[tag]")         -> adds up        (Catch2, doctest)
+//   SCENARIO("adds up")                   -> *Scenario: adds up
+//   BOOST_AUTO_TEST_CASE(name), TEST(name) -> name
+//   void test_add()                       -> test_add       (a plain function)
+std::string cpp_test_id(const std::string& sig, const std::string& qname) {
+  size_t paren = sig.find('(');
+  std::string macro = paren == std::string::npos ? "" : trim(sig.substr(0, paren));
+  bool is_macro = !macro.empty() && sig.back() == ')';
+  for (char c : macro)
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) is_macro = false;
+  if (!is_macro) {
+    std::string path = qname.substr(qname.find(':') + 1);
+    std::string last = path.substr(path.rfind('.') + 1);
+    last = last.substr(0, last.find('~'));
+    return last.substr(last.rfind("::") == std::string::npos ? 0 : last.rfind("::") + 2);
+  }
+  std::string body = sig.substr(paren + 1, sig.size() - paren - 2);
+  // A string argument names the test (Catch2, doctest; later strings are tags).
+  if (size_t q = body.find('"'); q != std::string::npos) {
+    std::string name;
+    for (size_t i = q + 1; i < body.size() && body[i] != '"'; ++i) {
+      if (body[i] == '\\' && i + 1 < body.size()) ++i;
+      name += body[i];
+    }
+    return starts_with(macro, "SCENARIO") ? "*Scenario: " + name : name;
+  }
+  // Otherwise identifiers: top-level arguments.
+  std::vector<std::string> args;
+  std::string cur;
+  int depth = 0;
+  for (char c : body) {
+    if (c == '(' || c == '<' || c == '[') ++depth;
+    if (c == ')' || c == '>' || c == ']') --depth;
+    if (c == ',' && depth == 0) {
+      args.push_back(trim(cur));
+      cur.clear();
+    } else {
+      cur += c;
+    }
+  }
+  args.push_back(trim(cur));
+  if (args.size() >= 2 && !args[0].empty() && !args[1].empty() && macro.find("BOOST") == std::string::npos) {
+    if (macro == "TEST_P") return "*/" + args[0] + "." + args[1] + "/*";
+    if (macro == "TYPED_TEST") return args[0] + "/*." + args[1];
+    if (macro == "TYPED_TEST_P") return "*/" + args[0] + "/*." + args[1];
+    return args[0] + "." + args[1];
+  }
+  return args.empty() ? macro : args[0];
+}
+
+std::string signature_of(Store& s, const Hash& def) {
+  Stmt st(s.db(), "SELECT signature FROM def_info WHERE hash = ?");
+  st.bind(1, def);
+  return st.step() ? st.text(0) : "";
+}
+
 std::string command_for(const Repo& repo, const std::string& lang, const std::vector<std::string>& nodes) {
+  if (lang == "cpp") {
+    // nodes: test names as the framework filters them; one quoted argument.
+    std::string tmpl = repo.config().test_command_cpp;
+    if (tmpl.empty()) return "";
+    std::string join = repo.config().test_join_cpp;
+    if (join.empty()) join = tmpl.find("gtest") != std::string::npos ? ":" : ",";
+    std::string list;
+    for (auto& n : nodes) {
+      std::string e;
+      for (char c : n) {
+        if (c == '"' || (join == "," && c == ',')) e += '\\';  // Catch2 / doctest: "a\,b" is one name
+        e += c;
+      }
+      list += (list.empty() ? "" : join) + e;
+    }
+    list = "\"" + list + "\"";
+    size_t at = tmpl.find("{tests}");
+    if (at == std::string::npos) return tmpl + " " + list;
+    return tmpl.replace(at, 7, list);
+  }
   if (lang == "gdscript") {
     // nodes: "<res path>::<test>" (or just "<res path>" for the whole file)
     std::string tmpl = repo.config().test_command_gdscript;
@@ -223,6 +304,8 @@ nlohmann::json verify(Repo& repo, bool all) {
     setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
 #endif
     // Batch per file; if a batch fails, run its tests one by one to attribute.
+    bool cpp_built = false;
+    RunResult cpp_build{0, ""};  // code stays 0 unless the build fails
     std::map<std::string, std::vector<const IndexRow*>> by_file;
     for (auto& [q, r] : test_rows) by_file[r.file].push_back(&r);
     for (auto& [file, rows] : by_file) {
@@ -230,8 +313,9 @@ nlohmann::json verify(Repo& repo, bool all) {
       // with node ids relative to that root.
       std::string root = rows[0]->lang == "python" ? python_root(tree, file) : "";
       fs::path dir = root.empty() ? tree : tree / from_utf8(root);
-      bool gd = rows[0]->lang == "gdscript";
+      bool gd = rows[0]->lang == "gdscript", cpp = rows[0]->lang == "cpp";
       auto node_of = [&](const IndexRow* r) {
+        if (cpp) return cpp_test_id(signature_of(s, r->hash), r->qname);
         if (gd) return godot_res_path(tree, file) + "::" + r->qname.substr(r->qname.rfind('.') == std::string::npos
                                                                                 ? r->qname.find(':') + 1
                                                                                 : r->qname.rfind('.') + 1);
@@ -244,13 +328,26 @@ nlohmann::json verify(Repo& repo, bool all) {
         for (auto* r : rows) nodes.push_back(node_of(r));
       std::string cmd = command_for(repo, rows[0]->lang, nodes);
       if (cmd.empty()) {
-        warnings.push_back({{"name", file}, {"problem", "no test command for " + rows[0]->lang}});
+        warnings.push_back({{"name", file}, {"problem", "no test command for " + rows[0]->lang +
+                                                            " (set [tests] " + rows[0]->lang + " in .hs/config.toml)"}});
         continue;
       }
-      RunResult batch = run_in(dir, cmd);
+      // C/C++: build once, before the first C++ test runs; if the build
+      // fails, every C++ test fails with its output.
+      if (cpp && !cpp_built) {
+        cpp_built = true;
+        if (!repo.config().test_build_cpp.empty()) cpp_build = run_in(tree, repo.config().test_build_cpp);
+        if (cpp_build.code != 0) {
+          cpp_build.output = "C++ build failed ([tests] cpp_build):\n" + cpp_build.output;
+          failures.push_back({{"name", "[tests] cpp_build"}, {"problem", "C++ build failed"}});
+        }
+      }
+      bool build_failed = cpp && cpp_build.code != 0;
+      RunResult batch = build_failed ? cpp_build : run_in(dir, cmd);
       for (auto* r : rows) {
         RunResult one = batch;
-        if (batch.code != 0 && rows.size() > 1) one = run_in(dir, command_for(repo, r->lang, {node_of(r)}));
+        if (batch.code != 0 && rows.size() > 1 && !build_failed)
+          one = run_in(dir, command_for(repo, r->lang, {node_of(r)}));
         std::string status = one.code == 0 ? "passed" : "failed";
         nlohmann::json j = {{"test", r->qname}, {"status", status}, {"test_hash", r->hash}};
         {

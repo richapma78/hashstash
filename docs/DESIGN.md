@@ -64,7 +64,7 @@ characters).
 | Files | Adapter | Definitions | Stays glue (module code) |
 |-------|---------|-------------|--------------------------|
 | `.py`, `.pyi` | python | functions, classes, methods, nested classes (decorators and comments above belong to them) | imports, constants, top-level statements |
-| `.c`, `.h`, `.cpp`, `.hpp`, ... | cpp | functions, records, namespaces (as containers), templates, out-of-class `A::f` as methods | `#include`s, forward declarations, `using` |
+| `.c`, `.h`, `.cpp`, `.hpp`, ... | cpp | functions, records, namespaces (as containers), templates, out-of-class `A::f` as methods, bodies written with a macro (test frameworks) as functions named after it: `TEST(Suite,Name)`, `TEST_CASE(adds_up)` (`.`, `:`, `~`, spaces and quotes become `_`; later string arguments, Catch2's tags, are left out) | `#include`s, forward declarations, `using` |
 | `.gd` | gdscript | `func`s (functions at the top, methods in an inner `class`), inner classes, `_init`, properties with `set`/`get` code, enums (comments and `@annotations` above belong to them) | `extends`, `class_name`, signals, constants, plain `var`s, the file's `@tool` |
 | `.tscn`, `.tres`, `.escn`, `project.godot` | godot | each section: `node` (named by its path from the scene root, as `get_node()` takes it: `Player`, `Sprite2D`, `Hurtbox/Shape`), `ext_resource` (`ext_<id>`), `sub_resource` (its id), `resource`, `connection` (`<from>/<signal>-<method>`), and the `[sections]` of `project.godot` | the `[gd_scene]` / `[gd_resource]` header, blank lines |
 
@@ -194,10 +194,26 @@ commit (everything, before the first push). It then generates the source tree, r
 the linked tests (`[tests] python = "python -m pytest -q {tests}"`; for GDScript, set
 `[tests] gdscript`, e.g. `godot --headless -s addons/gut/gut_cmdln.gd -gtest={file}
 -gunit_test_name={tests} -gexit` for GUT, where `{file}` is the test script's `res://`
-path and `{tests}` one test, or empty for the whole file), and records the
-result against the namespace hash. Commits are local; **a push only accepts verified
+path and `{tests}` one test, or empty for the whole file; for C and C++, see below),
+and records the result against the namespace hash. Commits are local; **a push only accepts verified
 commits.**
 
+* **C and C++ tests.** `[tests] cpp_build` runs once per verify, in the generated
+  tree, before any C++ test, e.g. `cmake -S . -B ../build -G Ninja && cmake --build
+  ../build`. A build folder outside the tree survives between verifies, and only
+  changed files are rewritten, so the build stays incremental. `[tests] cpp` then
+  runs the test binary with `{tests}` replaced by one quoted argument: the tests to
+  run, as the framework filters them, joined by `[tests] cpp_join` (default `:` when
+  the command mentions gtest, else `,`, with a comma inside a name escaped as `\,`).
+  The name comes from the test's head: GoogleTest `TEST(Suite, Name)` / `TEST_F` ->
+  `Suite.Name` (`TEST_P` -> `*/Suite.Name/*`, `TYPED_TEST` -> `Suite/*.Name`), Catch2 /
+  doctest `TEST_CASE("name", "[tag]")` -> `name` (`SCENARIO` -> `*Scenario: name`),
+  `BOOST_AUTO_TEST_CASE(name)` or a one-argument `TEST(name)` -> `name`, and a plain
+  `test_*` function -> its name. A failed build fails every C++ test, with the build
+  output. Examples: GoogleTest `..\build\unit_tests.exe --gtest_filter={tests}`,
+  Catch2 `..\build\unit_tests.exe {tests}`, doctest `..\build\unit_tests.exe
+  -tc={tests}`. On Windows, give the binary with a folder: cmd may be set not to
+  search the current one (`NoDefaultCurrentDirectoryInExePath`).
 * **Impact testing.** Verify also follows the call graph upwards and runs the tests
   of every caller up to `[tests] impact_depth` levels (default 3), so changing
   `add` also runs the tests of `mul`, which calls it.

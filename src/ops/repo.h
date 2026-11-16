@@ -32,6 +32,14 @@ struct Config {
   // {tests} = the test function when run one at a time ("" for the whole file).
   // e.g. godot --headless -s addons/gut/gut_cmdln.gd -gtest={file} -gunit_test_name={tests} -gexit
   std::string test_command_gdscript;
+  // C and C++ tests: cpp_build runs once per verify, in the generated tree,
+  // before any C++ test (e.g. a CMake configure + build); cpp runs a test binary
+  // with {tests} = the test names, joined by cpp_join and quoted. Names are what
+  // the framework filters by: GoogleTest "Suite.Name", Catch2 / doctest the
+  // TEST_CASE string, a plain test function its name.
+  // e.g. cpp = "..\build\unit_tests.exe --gtest_filter={tests}"
+  std::string test_command_cpp, test_build_cpp;
+  std::string test_join_cpp;  // "" = ":" when the command mentions gtest, else ","
   int tests_impact_depth = 3;              // verify also runs tests of callers this deep (0 = off)
   int history_keep = 500;                  // lifecycle entries kept per branch (0 = all)
   std::string review_approval = "both";    // where unreviewed commits are queued: local | hub | both | off

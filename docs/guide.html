@@ -245,6 +245,8 @@ the results with each push and pull, so they all show the same numbers.</p>
 <ul>
   <li>Each test file runs from its own project root: the nearest folder with <code>pytest.ini</code>, <code>pyproject.toml</code>, <code>setup.cfg</code> or <code>tox.ini</code>, otherwise the folder above its package and its <code>tests/</code> folder.</li>
   <li>The command comes from <code>[tests] python</code> in the settings. Python bytecode caches are cleared first, so a test always runs the code being verified.</li>
+  <li>GDScript tests run through <code>[tests] gdscript</code> (GUT, gdUnit4).</li>
+  <li>C and C++ tests: <code>[tests] cpp_build</code> builds the generated tree once (for example a CMake configure and build into <code>.hs/verify/build</code>). Then <code>[tests] cpp</code> runs your test binary with <code>{tests}</code> replaced by the tests to run, named as the framework filters them: <code>Suite.Name</code> for GoogleTest <code>TEST</code>/<code>TEST_F</code>, the name string for Catch2 and doctest <code>TEST_CASE</code>, and the function name for a plain <code>test_*</code> function. The names are joined with <code>:</code> when the command mentions gtest, otherwise with <code>,</code>; <code>[tests] cpp_join</code> overrides this. If the build fails, every C++ test fails with the build output. On Windows, give the binary with a folder (<code>..\build\tests.exe</code>, <code>.\tests.exe</code>), because the shell may not search the current folder.</li>
   <li><code>hs verify --all</code> checks every definition.</li>
 </ul></div>
 
@@ -503,6 +505,8 @@ minutes = 15      <span class="c"># a lock expires unless renewed within this ti
 require = "warn"  <span class="c"># every function/method needs linked test cases: off | warn | block</span>
 # exempt = ["__repr__", "_*"]   <span class="c"># short names that need no tests</span>
 python = "python -m pytest -q {tests}"   <span class="c"># how hs verify runs Python tests</span>
+# cpp_build = "cmake -S . -B ../build -G Ninja &amp;&amp; cmake --build ../build"   <span class="c"># C/C++: build once per verify</span>
+# cpp       = "..\build\unit_tests.exe --gtest_filter={tests}"          <span class="c"># C/C++: run the chosen tests</span>
 impact_depth = 3  <span class="c"># verify also runs the tests of callers up to this many levels away (0 = off)</span>
 
 [history]
