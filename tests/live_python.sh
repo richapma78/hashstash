@@ -39,7 +39,7 @@ run clone "$URL/$PROJECT" calc-bob
 (cd calc-bob && "$HS" lock calc/ops.py:Calculator.clear)
 cd "$W/calc-alice"; export HS_AGENT=alice
 out=$("$HS" lock calc/ops.py:Calculator.clear 2>&1); echo "$out"
-expect '[[ "$out" == *"locked on the hub by bob"* ]]' "hub lock refuses alice"
+expect '[[ "$out" == *"locked by bob"* ]]' "hub lock refuses alice"
 
 echo; echo "=== alice edits mul"
 "$HS" edit calc/ops.py:mul > /dev/null
@@ -114,9 +114,11 @@ run lock calc/ops.py:add
 cd "$W/calc-alice"; export HS_AGENT=alice
 run work start BUG-7 --kind bug --title "add crashes on None"
 out=$("$HS" lock calc/ops.py:add 2>&1); echo "$out"
-expect '[[ "$out" == *"locked on the hub by bob for FEAT-12"* ]]' "the lock says what it is for"
+expect '[[ "$out" == *"locked by bob for FEAT-12"* ]]' "the lock says what it is for"
+# Checking out again with a need logs it to bob in the same step (exit 4).
 printf 'def test_add_none():\n    assert add(None, 2) == 2\n' > ../need_test.py
-run request calc/ops.py:add --need "treat None as 0" --test-file tests/test_ops.py --test-code ../need_test.py
+out=$("$HS" lock calc/ops.py:add --need "add must treat None as 0, so add(None, 2) returns 2 and add(None, None) returns 0" --test-file tests/test_ops.py --test-code ../need_test.py 2>&1); code=$?; echo "$out"
+expect '[[ $code == 4 && "$out" == *"your need was logged"* && "$out" == *"add(None, None) returns 0"* ]]' "a blocked checkout with a need logs it"
 # Alice waits for the answer in the background (a long poll on the hub).
 ("$HS" inbox --wait 60 > ../alice-wait.txt; echo "exit $?" >> ../alice-wait.txt) &
 waiter=$!
@@ -134,7 +136,7 @@ open(p, "w", encoding="utf-8").write(s.replace("return a + b", "return (a or 0) 
 EOF
 run update -m "Treat None as 0"
 out=$("$HS" commit -m "add: treat None as 0" 2>&1); echo "$out"
-expect '[[ "$out" == *"other agents are waiting"* ]]' "commit refused while the request is open"
+expect '[[ "$out" == *"other agents need changes"* && "$out" == *"add(None, 2) returns 2"* ]]' "commit refused with the requester's brief"
 rid=$("$HS" requests --json | python -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
 run request accept "$rid"
 out=$("$HS" verify); echo "$out"

@@ -59,6 +59,10 @@ struct Request {
   std::string target, name, requester, requester_work, holder, holder_work, text, test_file, test_code;
   std::string status = "open";  // open accepted resolved done declined cancelled granted returned
   std::string commit, note;
+  // Filled in when the request is made, so any agent can act on it later:
+  // {version: def hash the requester saw, signature, requester_work_title,
+  //  requester_holds: [names the requester has checked out]}
+  nlohmann::json context = nlohmann::json::object();
   int priority = -1;  // -1: the requester's work item priority
   long long created = 0, updated = 0;
   bool is_open() const { return status == "open" || status == "accepted"; }

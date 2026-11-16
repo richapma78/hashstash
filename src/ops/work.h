@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "ops/coord.h"
+#include "ops/locks.h"
 #include "ops/history.h"
 #include "ops/repo.h"
 
@@ -49,8 +50,29 @@ WorkItem start_work(Repo& repo, WorkItem w);
 WorkItem finish_work(Repo& repo, const std::string& id, const std::string& status = "done");
 
 // Logs a request on a definition another agent holds. kind: change | lock.
+// A change request's text is the whole brief for whoever makes the change,
+// which may be an agent that has never seen the requester's work. It must say
+// what must change and why, the expected behaviour, and how to tell it is
+// done; check_need_text refuses texts too thin to act on (kNeedGuide says how).
+extern const char* const kNeedGuide;
+void check_need_text(const std::string& text);
+
+// Logs a request on a definition someone else holds. A change request also
+// records context (the version the requester saw, its signature, the
+// requester's work item and title, what else the requester has checked out).
 Request make_request(Repo& repo, const std::string& name, const std::string& kind, const std::string& text,
                      const std::string& test_file = "", const std::string& test_code = "");
+
+// What a checkout needs if it finds the definition locked: the change request
+// to log to the holder in the same step (see LockedError in ops/locks.h).
+struct Need {
+  std::string text, test_file, test_code;
+  bool empty() const { return text.find_first_not_of(" \t\r\n") == std::string::npos; }
+};
+Request request_from_blocked_checkout(Repo& repo, const LockedError& e, const Need& need);
+
+// Every line of a request, for the holder (or any agent taking over).
+std::string request_details(const Request& r);
 // Accept: adds the request's test code to test_file and links it to the
 // definition (so verify runs the requester's tests too), then marks it accepted.
 Request accept_request(Repo& repo, long long id);
@@ -60,11 +82,16 @@ Request cancel_request(Repo& repo, long long id);
 // this agent is the holder.
 std::vector<Request> waiting_on(Repo& repo, const std::set<std::string>& lineages);
 
+// No hub: requests this agent resolved in commits on its branch become done
+// once a verify passes (so the requester's tests passed). With a hub they
+// become done when it accepts the (verified) push. Returns how many.
+int land_verified(Repo& repo);
+
 struct WorkCommit {
   CommitResult result;
   std::vector<Request> resolved;   // marked resolved by this commit
   std::vector<Request> left_open;  // change requests on what was committed, not resolved ([work] requests = "warn")
-  int landed = 0;                  // requests done now (no hub: committing is sharing)
+  int landed = 0;                  // requests done now (never at commit: see land_verified)
   std::string warning;             // e.g. the hub couldn't be asked about requests
 };
 // commit() with the request gate: a commit that changes a definition with open

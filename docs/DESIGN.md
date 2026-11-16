@@ -351,6 +351,28 @@ lock is the thing to avoid, so locks carry intent and agents queue work, not the
   backend), or the hub over HTTP for a client whose project has one. Every change is
   one transaction, and nothing lives in server memory.
 
+**Checking out with a need.** An agent should state what it needs whenever it checks
+something out: `hs edit <name> --need "..." [--test-file f --test-code file]`,
+`hs lock ... --need`, or `need` (with `test_file`, `test_code`) on the MCP tools
+`hs_lock`, `hs_edit_def` and `hs_delete_def`. If the definition is free, the checkout
+just happens. If another agent holds it, the need is logged to the holder as a change
+request in the same step, and the caller is told it was queued (CLI exit code 4; MCP
+returns `checked_out: false` with the request) and carries on with other work.
+
+The need is the whole brief for whoever makes the change, possibly an agent that never
+saw the requester's work, so it must say what must change and why, the expected
+behaviour (inputs and outputs, edge cases, errors) and how to tell it is done. A
+description under 40 characters or 6 words is refused with that guidance. The request
+also records context: the version of the definition the requester saw and its
+signature, the requester's work item and title, and what else the requester has
+checked out. The holder's commit of that definition is refused with every line of the
+brief and the requester's test until it resolves (`--resolves`) or declines (with a
+reason) each request; accepting adds the requester's test and links it.
+
+A resolved request becomes done only when the requester's tests have passed: with a
+hub, when the hub accepts the verified push; without one, when `hs verify` passes on a
+branch containing the resolving commit. Until then it shows as resolved.
+
 ### Access keys: who may change what
 
 Agents are replaced and restarted with fresh contexts all the time, so an agent's

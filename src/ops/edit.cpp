@@ -235,8 +235,7 @@ std::string lineage_of(const Namespace& ns, const std::string& q) {
 void check_unlocked(Repo& repo, const Namespace& ns, const std::string& q) {
   std::string id = lineage_of(ns, q);
   if (id.empty()) return;
-  if (auto b = blocking_lock(repo, id))
-    throw std::runtime_error(q + " is locked by " + b->holder + " until " + format_time(b->expires));
+  if (auto b = blocking_lock(repo, id)) throw LockedError(q, *b);
 }
 
 // Moves lineage ids from old to new qualified names, including children.

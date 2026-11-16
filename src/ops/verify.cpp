@@ -1,5 +1,7 @@
 #include "ops/verify.h"
 
+#include "ops/work.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -301,6 +303,13 @@ nlohmann::json verify(Repo& repo, bool all) {
   st.bind(1, work_hash).bind(2, status).bind(3, now_seconds()).bind(4, repo.agent()).bind(5, report.dump()).run();
   repo.record("verify", work_hash, "", status + ": " + std::to_string(ran.size()) + " tests, " +
                                            std::to_string(failures.size()) + " failures");
+  if (status == "passed") {
+    try {  // no hub: requests resolved on this branch are done now their tests passed
+      if (int n = land_verified(repo)) report["requests_done"] = n;
+    } catch (std::exception& e) {
+      report["warnings"].push_back({{"name", "requests"}, {"problem", std::string("could not mark requests done: ") + e.what()}});
+    }
+  }
   return report;
 }
 

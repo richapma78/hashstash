@@ -26,7 +26,16 @@ struct LockInfo {
   long long expires = 0;
 };
 
-// Throws if another agent holds an unexpired lock on target.
+// Thrown whenever a definition can't be checked out because someone else
+// holds it (locally or on the hub). Callers given a "need" turn it into a
+// change request to the holder (ops/work.h) instead of failing.
+struct LockedError : std::runtime_error {
+  std::string name;  // what was being checked out
+  LockInfo held;     // the lock in the way
+  LockedError(const std::string& name, const LockInfo& held);
+};
+
+// Throws LockedError if another agent holds an unexpired lock on target.
 LockInfo acquire_lock(Repo& repo, const std::string& target, const std::string& name);
 // Returns false if no lock was held. Without force, only the holder may release.
 bool release_lock(Repo& repo, const std::string& target, bool force = false);

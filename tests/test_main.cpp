@@ -641,9 +641,21 @@ TEST(work_requests_local) {
 
     r->set_agent("agent-b");
     CHECK(current_work_id(*r) == "adhoc-agent-b");  // no item yet: an ad-hoc one
-    CHECK(throws([&] { acquire_lock(*r, mul.lineage, mul.qname); }));
-    Request rq = make_request(*r, "mul", "change", "keep accepting floats");
+    // A checkout that finds it locked, with a need, logs the need to the holder.
+    CHECK(throws([&] { make_request(*r, "mul", "change", "keep floats"); }));  // too thin for another agent to act on
+    Request rq;
+    try {
+      acquire_lock(*r, mul.lineage, mul.qname);
+    } catch (LockedError& e) {
+      CHECK(e.held.holder == "agent-a" && e.held.work == "FEAT-1" && e.name == mul.qname);
+      Need n;
+      n.text = "mul must keep accepting float arguments: mul(1.5, 2) returns 3.0 and mul(2, 0.5) returns 1.0";
+      rq = request_from_blocked_checkout(*r, e, n);
+    }
+    CHECK(rq.id > 0 && rq.holder == "agent-a" && rq.holder_work == "FEAT-1");
     CHECK(rq.requester_work == "adhoc-agent-b");
+    CHECK(rq.context.value("version", "") == mul.hash);  // the version the requester saw
+    CHECK(request_details(rq).find("mul(1.5, 2) returns 3.0") != std::string::npos);
 
     r->set_agent("agent-a");
     Namespace ns = r->work_ns();
@@ -651,9 +663,17 @@ TEST(work_requests_local) {
     commit_edits(*r, ns, {&e});
     CHECK(throws([&] { commit_work(*r, "faster mul"); }));
     CHECK(throws([&] { commit_work(*r, "faster mul", {rq.id + 99}); }));
+    try {
+      commit_work(*r, "faster mul");
+    } catch (std::exception& e) {  // the refusal carries the requester's whole brief
+      CHECK(std::string(e.what()).find("mul(2, 0.5) returns 1.0") != std::string::npos);
+    }
     auto wc = commit_work(*r, "faster mul, floats still work", {rq.id});
-    CHECK(wc.landed == 1);  // no hub: the commit is already shared
+    CHECK(wc.landed == 0);  // not done at commit: only once verify passes with its tests
+    CHECK(coordination(*r)->request(rq.id)->status == "resolved");
     CHECK(!lock_on(*r, mul.lineage));
+    CHECK(land_verified(*r) == 1);  // what a passing hs verify does (no hub)
+    CHECK(coordination(*r)->request(rq.id)->status == "done");
 
     r->set_agent("agent-b");
     auto ev = inbox(*r, true);
@@ -673,7 +693,7 @@ TEST(work_requests_local) {
     // B holds add now. A asks for a change, B declines: A is queued for the
     // lock instead, and gets it when B lets go.
     r->set_agent("agent-a");
-    Request r2 = make_request(*r, "add", "change", "rename the arguments");
+    Request r2 = make_request(*r, "add", "change", "rename the arguments of add to left and right, keeping their order");
     r->set_agent("agent-b");
     CHECK(throws([&] { decline_request(*r, r2.id, ""); }));  // a reason is required
     decline_request(*r, r2.id, "out of scope for my change");

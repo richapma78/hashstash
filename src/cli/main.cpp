@@ -372,10 +372,17 @@ int cmd_context(Repo& repo, const Args& a) {
   return 0;
 }
 
+int blocked_checkout(Repo& repo, const Args& a, const LockedError& e);
+
 int cmd_edit(Repo& repo, const Args& a) {
   need(a, 2, "edit <name>...");
   std::vector<std::string> names(a.pos.begin() + 1, a.pos.end());
-  auto files = open_for_edit(repo, names);
+  std::vector<fs::path> files;
+  try {
+    files = open_for_edit(repo, names);
+  } catch (LockedError& e) {
+    return blocked_checkout(repo, a, e);
+  }
   if (g_json) {
     json f = json::array();
     for (auto& p : files) f.push_back(to_generic(p));
@@ -482,7 +489,9 @@ int cmd_commit(Repo& repo, const Args& a) {
   }
   std::cout << "Committed #" << short_hash(r.commit) << " on " << repo.branch() << "\n";
   for (auto& q : wc.resolved)
-    std::cout << "Resolves R-" << q.id << " for " << q.requester << (wc.landed ? " (done)" : " (done when pushed)") << "\n";
+    std::cout << "Resolves R-" << q.id << " for " << q.requester
+              << (coordinated_by_hub(repo) ? " (done when the hub accepts your push)"
+                                           : " (done once hs verify passes with its tests)") << "\n";
   for (auto& q : wc.left_open) std::cout << "Still open: " << describe_request(q) << "\n";
   if (!wc.warning.empty()) std::cout << "Note: " << wc.warning << "\n";
   auto lines = split_lines(diff_to_text(repo.store(), r.diff, false));
@@ -653,13 +662,43 @@ int cmd_why(Repo& repo, const Args& a) {
   return 0;
 }
 
+// The need given with a checkout (--need, --test-file, --test-code file|-).
+Need need_of(const Args& a) {
+  Need n;
+  n.text = a.get("--need");
+  n.test_file = a.get("--test-file");
+  if (a.has("--test-code"))
+    n.test_code = a.get("--test-code") == "-" ? std::string(std::istreambuf_iterator<char>(std::cin), {})
+                                              : read_file(from_utf8(a.get("--test-code")));
+  return n;
+}
+
+// A checkout found the definition locked. With --need, log it to the holder
+// and say so (exit 4: not checked out, request logged); without, fail as before.
+int blocked_checkout(Repo& repo, const Args& a, const LockedError& e) {
+  Need n = need_of(a);
+  if (n.empty()) throw e;
+  Request r = request_from_blocked_checkout(repo, e, n);
+  if (g_json) return out_json({{"checked_out", false}, {"locked_by", e.held.holder}, {"request", r.to_json()}}), 4;
+  std::cout << e.name << " is checked out by " << e.held.holder << (e.held.work.empty() ? "" : " for " + e.held.work)
+            << ", so your need was logged to them:\n\n" << request_details(r) << "\n"
+            << r.holder << " can't commit " << r.name << " without making it (or declining with a reason). "
+            << "Carry on with other work; hs inbox --wait 300 tells you when it is done.\n";
+  return 4;
+}
+
 int cmd_lock(Repo& repo, const Args& a, bool lock) {
   if (lock) need(a, 2, "lock <name>...");
   else need(a, 2, "unlock <name>... [--force]");
   for (size_t i = 1; i < a.pos.size(); ++i) {
     IndexRow r = resolve_name(repo, a.pos[i]);
     if (lock) {
-      auto l = acquire_lock(repo, r.lineage, r.qname);
+      LockInfo l;
+      try {
+        l = acquire_lock(repo, r.lineage, r.qname);
+      } catch (LockedError& e) {
+        return blocked_checkout(repo, a, e);
+      }
       std::cout << "Locked " << r.qname << " until " << format_time(l.expires) << "\n";
     } else {
       bool ok = release_lock(repo, r.lineage, a.has("--force"));

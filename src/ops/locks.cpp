@@ -34,13 +34,18 @@ std::optional<LockInfo> blocking_lock(Repo& repo, const std::string& target) {
   return std::nullopt;
 }
 
-static std::runtime_error locked_error(const std::string& name, const LockInfo& b) {
+static std::string locked_message(const std::string& name, const LockInfo& b) {
   std::string what = b.work.empty() ? "" : " for " + b.work;
-  return std::runtime_error(name + " is locked by " + b.holder + what + " until " + format_time(b.expires) +
-                            ". Don't wait: log the change you need (hs_request, or hs request " + name +
-                            " --need \"...\"); the holder makes it before committing. Or queue for the lock "
-                            "(kind lock / --lock).");
+  return name + " is locked by " + b.holder + what + (b.expires ? " until " + format_time(b.expires) : "") +
+         ". Don't wait: check out again with a need (hs edit " + name +
+         " --need \"...\", or need=\"...\" on hs_lock / hs_edit_def) and it is logged to the holder, who must make "
+         "the change before committing " + name + ". Or queue for the lock (hs request " + name + " --lock).";
 }
+
+LockedError::LockedError(const std::string& n, const LockInfo& h)
+    : std::runtime_error(locked_message(n, h)), name(n), held(h) {}
+
+static LockedError locked_error(const std::string& name, const LockInfo& b) { return LockedError(name, b); }
 
 LockInfo acquire_lock(Repo& repo, const std::string& target, const std::string& name) {
   std::string work = current_work_id(repo);

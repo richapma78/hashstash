@@ -61,7 +61,7 @@ json Request::to_json() const {
   return {{"id", id}, {"kind", kind}, {"target", target}, {"name", name}, {"requester", requester},
           {"requester_work", requester_work}, {"holder", holder}, {"holder_work", holder_work}, {"text", text},
           {"test_file", test_file}, {"test_code", test_code}, {"status", status}, {"commit", commit}, {"note", note},
-          {"priority", priority}, {"created", created}, {"updated", updated}};
+          {"priority", priority}, {"created", created}, {"updated", updated}, {"context", context}};
 }
 Request Request::from_json(const json& j) {
   Request r;
@@ -80,6 +80,7 @@ Request Request::from_json(const json& j) {
   r.commit = j.value("commit", "");
   r.note = j.value("note", "");
   r.priority = j.value("priority", -1);
+  if (j.contains("context") && j["context"].is_object()) r.context = j["context"];
   r.created = j.value("created", 0LL);
   r.updated = j.value("updated", 0LL);
   return r;
@@ -111,7 +112,7 @@ namespace {
 
 const char* kRequestCols =
     "id, kind, target, name, requester, requester_work, holder, holder_work, text, test_file, test_code, "
-    "status, commit_hash, note, priority, created, updated";
+    "status, commit_hash, note, priority, created, updated, context";
 
 Request read_request(Stmt& st) {
   Request r;
@@ -132,6 +133,11 @@ Request read_request(Stmt& st) {
   r.priority = (int)st.integer(14);
   r.created = st.integer(15);
   r.updated = st.integer(16);
+  try {
+    r.context = json::parse(st.text(17));
+  } catch (...) {
+  }
+  if (!r.context.is_object()) r.context = json::object();
   return r;
 }
 
@@ -287,9 +293,12 @@ class SqlCoordination : public Coordination {
           Request cur = read_request(st);
           if (!r.text.empty()) cur.text = r.text;
           if (!r.test_code.empty()) cur.test_code = r.test_code, cur.test_file = r.test_file;
+          if (!r.context.empty()) cur.context = r.context;
           cur.updated = now_seconds();
-          Stmt up(s_.db(), "UPDATE request SET text = ?, test_file = ?, test_code = ?, updated = ? WHERE id = ?");
-          up.bind(1, cur.text).bind(2, cur.test_file).bind(3, cur.test_code).bind(4, cur.updated).bind(5, cur.id).run();
+          Stmt up(s_.db(),
+                  "UPDATE request SET text = ?, test_file = ?, test_code = ?, context = ?, updated = ? WHERE id = ?");
+          up.bind(1, cur.text).bind(2, cur.test_file).bind(3, cur.test_code).bind(4, cur.context.dump())
+              .bind(5, cur.updated).bind(6, cur.id).run();
           r = cur;
           emit(cur.holder, cur.holder_work, "request_updated", {{"request", cur.to_json()}});
           return;
@@ -477,12 +486,12 @@ class SqlCoordination : public Coordination {
   void insert_request(Request& r) {
     Stmt st(s_.db(),
             "INSERT INTO request(kind, target, name, requester, requester_work, holder, holder_work, text, test_file, "
-            "test_code, status, commit_hash, note, priority, created, updated) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            "test_code, status, commit_hash, note, priority, created, updated, context) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     st.bind(1, r.kind).bind(2, r.target).bind(3, r.name).bind(4, r.requester).bind(5, r.requester_work)
         .bind(6, r.holder).bind(7, r.holder_work).bind(8, r.text).bind(9, r.test_file).bind(10, r.test_code)
         .bind(11, r.status).bind(12, r.commit).bind(13, r.note).bind(14, (long long)r.priority).bind(15, r.created)
-        .bind(16, r.updated).run();
+        .bind(16, r.updated).bind(17, r.context.dump()).run();
     Stmt id(s_.db(), "SELECT last_insert_rowid()");
     if (id.step()) r.id = id.integer(0);
   }

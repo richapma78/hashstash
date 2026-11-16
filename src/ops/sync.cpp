@@ -1,5 +1,7 @@
 #include "ops/sync.h"
 
+#include "ops/coord.h"
+
 #include <httplib.h>
 
 #include <deque>
@@ -135,10 +137,8 @@ void remote_lock_hook(Repo& repo, const LockInfo& l, bool acquire, bool force) {
     json r = t->call("lock", {{"target", l.target}, {"name", l.name}, {"agent", l.holder}, {"work", l.work},
                               {"minutes", repo.config().lock_minutes}});
     if (!r.value("ok", false)) {
-      std::string work = r["held_by"].value("work", "");
-      throw std::runtime_error(l.name + " is locked on the hub by " + r["held_by"]["holder"].get<std::string>() +
-                               (work.empty() ? "" : " for " + work) + ". Log what you need instead of waiting: hs request " +
-                               l.name + " --need \"...\", or --lock to take it next");
+      LockRec b = LockRec::from_json(r["held_by"]);
+      throw LockedError(l.name, LockInfo{b.target, b.name, b.holder, b.work, b.acquired, b.expires});
     }
   } else {
     t->call("unlock", {{"target", l.target}, {"agent", l.holder}, {"force", force}});

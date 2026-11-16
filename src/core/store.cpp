@@ -239,7 +239,8 @@ CREATE TABLE IF NOT EXISTS request (
   note TEXT NOT NULL,
   priority INTEGER NOT NULL,
   created INTEGER NOT NULL,
-  updated INTEGER NOT NULL
+  updated INTEGER NOT NULL,
+  context TEXT NOT NULL DEFAULT '{}'  -- JSON: what any agent needs to act on it (see Request)
 );
 CREATE INDEX IF NOT EXISTS request_target ON request(target, status);
 CREATE TABLE IF NOT EXISTS event (
@@ -293,6 +294,8 @@ Store::Store(const std::string& db_path) {
       /* 1 -> 2: locks remember their origin and work item */
       {"ALTER TABLE lock ADD COLUMN origin TEXT NOT NULL DEFAULT ''",
        "ALTER TABLE lock ADD COLUMN work TEXT NOT NULL DEFAULT ''"},
+      /* 2 -> 3: change requests carry context for whichever agent picks them up */
+      {"ALTER TABLE request ADD COLUMN context TEXT NOT NULL DEFAULT '{}'"},
   };
   for (int v = version; v < kStoreVersion; ++v) {
     for (const char* sql : kMigrations.at(v)) {

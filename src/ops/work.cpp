@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <stdexcept>
 
+#include "lang/lang.h"
 #include "ops/diff.h"
 #include "ops/edit.h"
 #include "ops/locks.h"
@@ -105,21 +106,111 @@ WorkItem finish_work(Repo& repo, const std::string& id_in, const std::string& st
   return out;
 }
 
+const char* const kNeedGuide =
+    "Write it so any agent can make the change without your context: what must change and why, the expected "
+    "behaviour (inputs and outputs, edge cases, errors), and how to tell it is done. Attach a test "
+    "(test_file + test_code) when you can: it becomes one of the definition's tests, so verify holds the change to it.";
+
+void check_need_text(const std::string& text) {
+  std::string t = trim(text);
+  int words = 0;
+  bool in_word = false;
+  for (char c : t) {
+    bool w = !(c == ' ' || c == '\t' || c == '\n' || c == '\r');
+    if (w && !in_word) ++words;
+    in_word = w;
+  }
+  if (t.size() < 40 || words < 6)
+    throw std::runtime_error("the description of the change you need is too short to act on (\"" + t + "\"). " +
+                             kNeedGuide);
+}
+
 Request make_request(Repo& repo, const std::string& name, const std::string& kind, const std::string& text,
                      const std::string& test_file, const std::string& test_code) {
   IndexRow row = resolve_name(repo, name);
   if (!test_code.empty() && test_file.empty())
     throw std::runtime_error("test code in a request needs the test file it belongs in (e.g. tests/test_ops.py)");
+  if (kind == "change") check_need_text(text);
   Request r;
   r.kind = kind;
   r.target = row.lineage;
   r.name = row.qname;
   r.requester = repo.agent();
   r.requester_work = current_work_id(repo);
-  r.text = text;
+  r.text = trim(text);
   r.test_file = test_file;
   r.test_code = test_code;
-  return coordination(repo)->add_request(r);
+  auto c = coordination(repo);
+  if (kind == "change") {
+    json ctx = {{"version", row.hash}};
+    try {
+      json sum = def_summary(repo, row);
+      if (!sum.value("signature", "").empty()) ctx["signature"] = sum.value("signature", "");
+    } catch (...) {
+    }
+    if (auto w = c->work(r.requester_work); w && !w->title.empty()) ctx["requester_work_title"] = w->title;
+    json holds = json::array();
+    for (auto& l : c->locks())
+      if (l.holder == r.requester && l.target != r.target) holds.push_back(l.name);
+    if (!holds.empty()) ctx["requester_holds"] = holds;
+    r.context = ctx;
+  }
+  return c->add_request(r);
+}
+
+Request request_from_blocked_checkout(Repo& repo, const LockedError& e, const Need& need) {
+  return make_request(repo, e.name, "change", need.text, need.test_file, need.test_code);
+}
+
+std::string request_details(const Request& r) {
+  std::string who = r.requester + (r.requester_work.empty() ? "" : " (" + r.requester_work +
+                                   (r.context.value("requester_work_title", "").empty()
+                                        ? std::string()
+                                        : ": " + r.context.value("requester_work_title", "")) + ")");
+  std::string o = "R-" + std::to_string(r.id) + " [" + r.status + "] " + r.kind + " request on " + r.name + "\n";
+  o += "  from:     " + who + ", " + format_time(r.created) + "\n";
+  o += "  for:      " + r.holder + (r.holder_work.empty() ? "" : " (" + r.holder_work + ")") + "\n";
+  if (r.kind == "change") o += "  needed:   " + r.text + "\n";
+  if (r.context.contains("version"))
+    o += "  written against #" + short_hash(r.context.value("version", "")) +
+         (r.context.value("signature", "").empty() ? "" : ": " + r.context.value("signature", "")) + "\n";
+  if (r.context.contains("requester_holds")) {
+    std::string h;
+    for (auto& n : r.context["requester_holds"]) h += (h.empty() ? "" : ", ") + n.get<std::string>();
+    o += "  requester is working on: " + h + "\n";
+  }
+  if (!r.test_code.empty()) o += "  tests for " + r.test_file + ":\n" + indent(r.test_code, "    ");
+  if (!r.test_code.empty() && r.test_code.back() != '\n') o += "\n";
+  if (!r.note.empty()) o += "  note:     " + r.note + "\n";
+  if (!r.commit.empty()) o += "  commit:   #" + short_hash(r.commit) + "\n";
+  return o;
+}
+
+int land_verified(Repo& repo) {
+  if (coordinated_by_hub(repo)) return 0;  // the hub marks them done when it accepts the push
+  auto head = repo.head_commit();
+  if (!head) return 0;
+  auto c = coordination(repo);
+  RequestFilter f;
+  f.agent = repo.agent();
+  f.role = "holder";
+  f.open_only = true;
+  std::vector<Request> resolved;
+  for (auto& r : c->requests(f))
+    if (r.status == "resolved" && !r.commit.empty()) resolved.push_back(r);
+  if (resolved.empty()) return 0;
+  std::set<std::string> history;
+  std::vector<Hash> todo{*head};
+  while (!todo.empty()) {
+    Hash h = todo.back();
+    todo.pop_back();
+    if (h.empty() || !history.insert(h).second) continue;
+    for (auto& p : load_commit(repo.store(), h).parents) todo.push_back(p);
+  }
+  std::vector<std::string> commits;
+  for (auto& r : resolved)
+    if (history.count(r.commit)) commits.push_back(r.commit);
+  return commits.empty() ? 0 : c->land(commits);
 }
 
 static std::string qname_of(Repo& repo, const Request& r) {
@@ -234,17 +325,17 @@ WorkCommit commit_work(Repo& repo, const std::string& message, const std::vector
   for (auto& r : waiting)
     if (!resolve_ids.count(r.id)) out.left_open.push_back(r);
   if (!out.left_open.empty() && repo.config().requests_on_commit != "warn") {
-    std::string msg = "other agents are waiting on changes to what you are committing:";
-    for (auto& r : out.left_open) msg += "\n  " + describe_request(r);
-    msg += "\nMake the change (accept first to add their tests), then commit with resolves [ids] "
-           "(hs commit --resolves 3,4), or decline with a reason (hs request decline <id> --reason \"...\").";
+    std::string msg = "other agents need changes to what you are committing, and you have not made them yet:\n";
+    for (auto& r : out.left_open) msg += "\n" + request_details(r);
+    msg += "\nFor each: accept it (its tests are added and linked), implement it, verify, then commit with "
+           "resolves [ids] (hs commit --resolves 3,4). Or decline with a reason (hs request decline <id> --reason "
+           "\"...\"). It is done once a verify passes with its tests.";
     throw std::runtime_error(msg);
   }
   // Keep the locks until the requests are resolved, so releasing them doesn't
   // hand a lock to a requester whose change was just made.
   out.result = commit(repo, message, true);
   for (auto& r : to_resolve) out.resolved.push_back(coord->update_request(r.id, "resolve", repo.agent(), "", out.result.commit));
-  if (coord && !coordinated_by_hub(repo)) out.landed = coord->land({out.result.commit});  // no hub: committed is shared
   if (!keep_locks)
     for (auto& l : list_locks(repo))
       if (l.holder == repo.agent() && touched.count(l.target)) out.result.locks_released += release_lock(repo, l.target);

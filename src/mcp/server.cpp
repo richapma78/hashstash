@@ -83,11 +83,38 @@ std::vector<std::string> str_list(const json& a, const char* key) {
   return a[key].get<std::vector<std::string>>();
 }
 
+// A checkout found the definition held by another agent. With a need, it is
+// logged to the holder as a change request and the call succeeds with that
+// news; without one, the call fails and says how to retry.
+json blocked(Repo& r, const LockedError& e, const json& a) {
+  Need n;
+  n.text = a.value("need", "");
+  n.test_file = a.value("test_file", "");
+  n.test_code = a.value("test_code", "");
+  if (n.empty()) throw std::runtime_error(e.what());
+  Request q = request_from_blocked_checkout(r, e, n);
+  return {{"checked_out", false},
+          {"name", e.name},
+          {"locked_by", e.held.holder},
+          {"locked_for", e.held.work},
+          {"request", q.to_json()},
+          {"details", request_details(q)},
+          {"next", "Not checked out: " + e.held.holder + " holds it and must implement your need (R-" +
+                       std::to_string(q.id) + ") before committing it, or decline with a reason. Carry on with "
+                       "other work; hs_inbox tells you when it is done."}};
+}
+
 }  // namespace
 
 json McpServer::tool_list() {
   json name = prop("string", "Definition name: 'file.py:Class.method', 'module.Class.method' or a unique short name");
   json reason = prop("string", "Why: the request or design context behind this change (kept in the definition's context history)");
+  std::string need_desc = std::string(
+      "If another agent has it checked out: the change you need from them, logged to them as a request they must "
+      "implement before committing it. ") + kNeedGuide;
+  json need_prop = {{"type", "string"}, {"description", need_desc}};
+  json need_test_file = prop("string", "With need: the test file your test belongs in (e.g. tests/test_ops.py)");
+  json need_test_code = prop("string", "With need: test code proving the change; added and linked when they accept");
   return json::array({
       tool("hs_status", "Branch, uncommitted changes, locks, verification state."),
       tool("hs_find", "Search definitions by words in names, signatures and docstrings.",
@@ -108,8 +135,13 @@ json McpServer::tool_list() {
             {"name", name}, {"to", prop("string", "Target for 'path'")},
             {"depth", prop("integer", "Depth for reach/impact (default 3)")}},
            {"query"}),
-      tool("hs_lock", "Lock definitions so no other agent can change them (expires unless renewed by activity).",
-           {{"names", str_array("Definitions to lock")}}, {"names"}),
+      tool("hs_lock",
+           "Check out (lock) definitions so no other agent can change them (expires unless renewed by activity). "
+           "Always pass need: if a definition turns out to be checked out by another agent, need is logged to "
+           "them as a change request they must implement before committing it, instead of failing.",
+           {{"names", str_array("Definitions to lock")}, {"need", need_prop}, {"test_file", need_test_file},
+            {"test_code", need_test_code}},
+           {"names"}),
       tool("hs_unlock", "Release locks.", {{"names", str_array("Definitions to unlock")}, {"force", prop("boolean", "Break another agent's lock")}}, {"names"}),
       tool("hs_locks", "List active locks."),
       tool("hs_edit_def",
@@ -117,13 +149,17 @@ json McpServer::tool_list() {
            "helpers): the one keeping the name keeps its identity, history and tests. Locks it for "
            "you if free. Pass base (the hash from hs_view/hs_context) to detect concurrent changes.",
            {{"name", name}, {"code", prop("string", "New source code for the definition")},
-            {"base", prop("string", "Hash the edit is based on (optional)")}, {"reason", reason}},
+            {"base", prop("string", "Hash the edit is based on (optional)")}, {"reason", reason},
+            {"need", need_prop}, {"test_file", need_test_file}, {"test_code", need_test_code}},
            {"name", "code", "reason"}),
       tool("hs_add_def", "Add new definitions to a file (created if missing), optionally inside a class and after a member.",
            {{"file", prop("string", "File path, e.g. 'pkg/mod.py'")}, {"container", prop("string", "Class path inside the file, e.g. 'Server'")},
             {"after", prop("string", "Member to insert after")}, {"code", prop("string", "Source code")}, {"reason", reason}},
            {"file", "code", "reason"}),
-      tool("hs_delete_def", "Delete a definition.", {{"name", name}, {"reason", reason}}, {"name"}),
+      tool("hs_delete_def", "Delete a definition.",
+           {{"name", name}, {"reason", reason}, {"need", need_prop}, {"test_file", need_test_file},
+            {"test_code", need_test_code}},
+           {"name"}),
       tool("hs_tests", "Linked test cases of a definition, its suite hash, and suggested tests.", {{"name", name}}, {"name"}),
       tool("hs_link_tests", "Link test cases to a definition (many tests per definition).",
            {{"name", name}, {"tests", str_array("Test definitions")}}, {"name", "tests"}),
@@ -295,7 +331,13 @@ json McpServer::call_tool(const std::string& t, const json& a) {
     for (auto& n : str_list(a, "names")) {
       IndexRow row = resolve_name(r, n);
       if (t == "hs_lock") {
-        auto l = acquire_lock(r, row.lineage, row.qname);
+        LockInfo l;
+        try {
+          l = acquire_lock(r, row.lineage, row.qname);
+        } catch (LockedError& e) {
+          out.push_back(blocked(r, e, a));
+          continue;
+        }
         out.push_back({{"locked", row.qname}, {"until", format_time(l.expires)}});
       } else {
         out.push_back({{"unlocked", row.qname}, {"was_locked", release_lock(r, row.lineage, a.value("force", false))}});
@@ -388,11 +430,17 @@ json McpServer::call_tool(const std::string& t, const json& a) {
   }
   if (t == "hs_edit_def") {
     IndexRow row = resolve_name(r, need_str(a, "name"));
-    if (!lock_on(r, row.lineage)) acquire_lock(r, row.lineage, row.qname);
-    Namespace ns = r.work_ns();
-    EditOutcome o = replace_def(r, ns, row.qname, need_str(a, "code"), a.value("base", ""), need_str(a, "reason"));
-    if (o.ok) commit_edits(r, ns, {&o}, need_str(a, "reason"));
-    return outcome_json(o);
+    try {
+      // Held by someone else: say so (and log the need) before trying the edit.
+      if (auto b = blocking_lock(r, row.lineage)) throw LockedError(row.qname, *b);
+      if (!lock_on(r, row.lineage)) acquire_lock(r, row.lineage, row.qname);
+      Namespace ns = r.work_ns();
+      EditOutcome o = replace_def(r, ns, row.qname, need_str(a, "code"), a.value("base", ""), need_str(a, "reason"));
+      if (o.ok) commit_edits(r, ns, {&o}, need_str(a, "reason"));
+      return outcome_json(o);
+    } catch (LockedError& e) {
+      return blocked(r, e, a);
+    }
   }
   if (t == "hs_add_def") {
     Namespace ns = r.work_ns();
@@ -402,10 +450,16 @@ json McpServer::call_tool(const std::string& t, const json& a) {
     return outcome_json(o);
   }
   if (t == "hs_delete_def") {
-    Namespace ns = r.work_ns();
-    EditOutcome o = delete_def(r, ns, qn());
-    if (o.ok) commit_edits(r, ns, {&o}, a.value("reason", ""));
-    return outcome_json(o);
+    try {
+      IndexRow row = resolve_name(r, qn());
+      if (auto b = blocking_lock(r, row.lineage)) throw LockedError(row.qname, *b);
+      Namespace ns = r.work_ns();
+      EditOutcome o = delete_def(r, ns, qn());
+      if (o.ok) commit_edits(r, ns, {&o}, a.value("reason", ""));
+      return outcome_json(o);
+    } catch (LockedError& e) {
+      return blocked(r, e, a);
+    }
   }
   if (t == "hs_tests") return tests_info(r, need_str(a, "name"));
   if (t == "hs_link_tests" || t == "hs_unlink_tests") {
