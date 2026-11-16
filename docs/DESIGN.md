@@ -597,3 +597,8 @@ tests/         unit tests, round-trip fixtures, smoke.sh, mcp_smoke.py, live_hub
 6. **Scale.** Object store, Postgres refs and locks, queue-backed workers behind the
    same interfaces.
 7. **Graphical editor.** Shows the store as readable code with live graphs, edits through the same library.
+
+## License
+
+hashstash is free for noncommercial use under the PolyForm Noncommercial License 1.0.0
+(`LICENSE.md`). Commercial use needs a separate license; see `LICENSING.md`.
