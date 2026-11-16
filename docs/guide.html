@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hashstash manual</title>
+<meta name="description" content="How to build hashstash on Windows and use it by hand: import, edit, test, verify, push, pull, publish, and connect AI agents.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><div class="inner">
+  <a class="brand" href="index.html">hash<span>stash</span></a>
+  <nav>
+    <a href="index.html">Concept</a>
+    <a href="guide.html" aria-current="page">Manual</a>
+    <a href="DESIGN.md">Design notes</a>
+  </nav>
+</div></header>
+
+<main>
+<section class="hero">
+  <p class="tag">Manual</p>
+  <h1>Using hashstash by hand</h1>
+  <p class="lead">This manual takes a small Python project from import to a published git branch: editing,
+  tests, history, the hub and AI agents along the way. Every output shown is real output from the commands.</p>
+</section>
+
+<ol class="toc">
+  <li><a href="#install">Build and install (Windows)</a></li>
+  <li><a href="#first">Your first project</a></li>
+  <li><a href="#browse">Browsing code</a></li>
+  <li><a href="#edit">Editing</a></li>
+  <li><a href="#tests">Tests and verify</a></li>
+  <li><a href="#review">Reviewing changes</a></li>
+  <li><a href="#history">History and rollback</a></li>
+  <li><a href="#notes">Notes and context</a></li>
+  <li><a href="#graph">The call graph</a></li>
+  <li><a href="#hub">Working with a hub</a></li>
+  <li><a href="#locks">Locks</a></li>
+  <li><a href="#publish">Publishing to git (nightly builds)</a></li>
+  <li><a href="#agents">Connecting AI agents (MCP)</a></li>
+  <li><a href="#config">Settings</a></li>
+  <li><a href="#commands">Command list</a></li>
+  <li><a href="#trouble">When something is refused</a></li>
+</ol>
+
+<h2 id="install"><span class="num">1</span>Build and install (Windows)</h2>
+<p>hashstash is two programs: <code>hs</code>, the client you use in a project, and <code>hshub</code>, the server.
+Both build from source with a C++20 compiler. Every library is downloaded automatically by CMake.</p>
+<h3>On a fresh Windows install</h3>
+<ol class="steps">
+  <li>Install the tools (PowerShell). WinLibs includes the GCC compiler and Ninja:
+<pre><span class="p">PS&gt; </span>winget install Git.Git Kitware.CMake Python.Python.3.13 BrechtSanders.WinLibs.POSIX.UCRT
+<span class="p">PS&gt; </span>python -m pip install pytest</pre>
+  Open a new terminal afterwards so the tools are on <code>PATH</code>. Check them with <code>g++ --version</code>, <code>cmake --version</code> and <code>ninja --version</code>.</li>
+  <li>Get the source and build:
+<pre><span class="p">PS&gt; </span>git clone https://github.com/richapma78/hashstash.git C:\Projects\hashstash
+<span class="p">PS&gt; </span>cd C:\Projects\hashstash
+<span class="p">PS&gt; </span>cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+<span class="p">PS&gt; </span>cmake --build build</pre>
+  The first build downloads SQLite, tree-sitter, BLAKE3 and the other libraries, and takes a few minutes.</li>
+  <li>Run the tests:
+<pre><span class="p">PS&gt; </span>build\hs_tests.exe
+<span class="c">...
+70 checks passed, 0 failed</span></pre></li>
+  <li>Put <code>C:\Projects\hashstash\build</code> on your <code>PATH</code> so <code>hs</code> and <code>hshub</code> work from any folder:
+<pre><span class="p">PS&gt; </span>[Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Projects\hashstash\build", "User")</pre></li>
+</ol>
+<div class="note">The executables are statically linked, so <code>hs.exe</code> and <code>hshub.exe</code> can be copied to another
+Windows machine on their own. Python and pytest are only needed for running Python tests.</div>
+
+<h2 id="first"><span class="num">2</span>Your first project</h2>
+<p>The examples use a small project with one module and its tests:</p>
+<pre><span class="c">sample_project/
+  calc/__init__.py
+  calc/ops.py          add, mul, class Calculator (__init__, apply, clear)
+  tests/test_ops.py    test_add, test_add_negative, test_mul, TestCalculator.test_apply</span></pre>
+<p>Create a store and import the code. The store is the <code>.hs/</code> folder in the project directory.</p>
+<pre><span class="p">&gt; </span>mkdir calc-work &amp;&amp; cd calc-work
+<span class="p">&gt; </span>hs init calc
+<span class="c">Created hashstash project 'calc' in C:/…/calc-work/.hs</span>
+<span class="p">&gt; </span>hs import C:\Projects\hashstash\tests\fixtures\sample_project
+<span class="c">Imported 3 source files (11 definitions) and 0 other files.
+Linked 4 tests to the definitions they call.
+  2 functions/methods have no test cases (hs tests missing).</span></pre>
+<p>Import split the files into definitions, built the index and call graph, and linked each test to the functions it calls.
+Nothing is committed yet:</p>
+<pre><span class="p">&gt; </span>hs status
+<span class="c">On branch main (no commits yet)
+Uncommitted changes:
+  new file      calc/__init__.py
+  new file      calc/ops.py
+  new file      tests/test_ops.py
+  added         calc/ops.py:add
+  added         calc/ops.py:mul
+  …
+  test links changed</span>
+<span class="p">&gt; </span>hs commit -m "Import the calc sample"
+<span class="c">Committed #b5dpcitcko on main
+  …
+Not verified yet: run hs verify before pushing.</span></pre>
+<p>To get ordinary files back at any time:</p>
+<pre><span class="p">&gt; </span>hs render --out ..\calc-out
+<span class="c">Rendered to C:/…/calc-out: 3 written, 0 unchanged, 0 deleted.</span>
+<span class="p">&gt; </span>cd ..\calc-out &amp;&amp; python -m pytest -q
+<span class="c">....                                                                     [100%]
+4 passed in 0.01s</span></pre>
+<div class="note"><b>Names.</b> Definitions are named <code>file:Class.method</code>, e.g. <code>calc/ops.py:Calculator.apply</code>.
+A unique short form works too: <code>add</code>, <code>Calculator.apply</code>. A repeated name in the same scope gets <code>~2</code>, <code>~3</code>…</div>
+
+<h2 id="browse"><span class="num">3</span>Browsing code</h2>
+<pre><span class="p">&gt; </span>hs ls
+<span class="c">uo6gamhv  function  calc/ops.py:add
+5xp6l2zx  function  calc/ops.py:mul
+jcvqt7y7  class     calc/ops.py:Calculator
+34fyfhkw  method      calc/ops.py:Calculator.__init__
+vhybmn47  method      calc/ops.py:Calculator.apply
+sm6he3ne  method      calc/ops.py:Calculator.clear
+7xdypxr7  function  tests/test_ops.py:test_add
+…</span>
+<span class="p">&gt; </span>hs view calc/ops.py:mul
+<span class="c"># calc/ops.py:mul  #5xp6l2zxot
+def mul(a, b):
+    total = 0
+    for _ in range(b):
+        total = add(total, a)
+    return total</span></pre>
+<ul>
+  <li><code>hs ls calc/ops.py:Calculator.</code> lists what's under a prefix.</li>
+  <li><code>hs find &lt;words&gt;</code> searches names, signatures and docstrings.</li>
+  <li><code>hs context &lt;name&gt;</code> shows everything about one definition: code, notes, context, tests, callers, callees and history (see <a href="#notes">section 7</a>).</li>
+</ul>
+
+<h2 id="edit"><span class="num">4</span>Editing</h2>
+<p>Code lives in the store, so you don't edit files directly. <code>hs edit</code> locks the definitions and writes
+them to a scratch file in <code>.hs/scratch/</code>. Open it in any editor:</p>
+<pre><span class="p">&gt; </span>hs edit calc/ops.py:mul
+<span class="c">Opened for editing in C:/…/calc-work/.hs/scratch/edit.py
+Locked for 15 minutes (renewed as you work). When done: hs update</span></pre>
+<p>The scratch file looks like this. Change the code below the <code># @hs:</code> line and leave that line alone:</p>
+<pre><span class="c"># hashstash scratch file. Edit the definitions below, then run: hs update
+# Each section starts with a "# @hs:" line; keep those lines as they are.
+# A section may hold several definitions (e.g. a function split into helpers).
+# Add code:     # @hs:new &lt;file&gt;[:&lt;Class&gt;] [after=&lt;name&gt;]
+# Delete code:  # @hs:delete &lt;file&gt;:&lt;name&gt;</span>
+
+# @hs:edit calc/ops.py:mul base=5xp6l2zxot
+def mul(a, b):
+<span class="add">    """Multiply a by a non-negative integer b."""
+    if b &lt; 0:
+        raise ValueError("b must be non-negative")</span>
+    total = 0
+    for _ in range(b):
+        total = add(total, a)
+    return total</pre>
+<p>Store the edit with a reason, review it, and commit:</p>
+<pre><span class="p">&gt; </span>hs update -m "Reject negative b instead of silently returning 0"
+<span class="c">stored  calc/ops.py:mul</span>
+<span class="p">&gt; </span>hs diff
+<span class="c">  changed       calc/ops.py:mul
+      @@ -1,4 +1,7 @@
+       def mul(a, b):</span>
+<span class="add">      +    """Multiply a by a non-negative integer b."""
+      +    if b &lt; 0:
+      +        raise ValueError("b must be non-negative")</span>
+<span class="c">           total = 0
+           for _ in range(b):
+               total = add(total, a)</span>
+<span class="p">&gt; </span>hs commit -m "mul: reject negative multipliers"
+<span class="c">Committed #c4n53okjgb on main
+  changed       calc/ops.py:mul
+Released 1 lock(s).
+Not verified yet: run hs verify before pushing.</span></pre>
+<h3>Adding and deleting</h3>
+<ul>
+  <li><code>hs new calc/ops.py</code> opens a section for a new top-level function. <code>hs new calc/ops.py:Calculator --after apply</code> adds a method after <code>apply</code>.</li>
+  <li><code>hs rm calc/ops.py:Calculator.clear</code> deletes a definition.</li>
+  <li>Renaming is just an edit: change <code>def mul</code> to <code>def times</code>. The lineage stays the same, so tests, notes and history follow the function.</li>
+</ul>
+<div class="note">The <code>base=</code> hash records which version you started from. If someone else changed the function in the meantime,
+<code>hs update</code> refuses instead of overwriting their work.</div>
+
+<h2 id="tests"><span class="num">5</span>Tests and verify</h2>
+<h3>Linking tests to functions</h3>
+<p>Import links each test to the functions it calls. You can inspect and adjust the links yourself:</p>
+<pre><span class="p">&gt; </span>hs tests calc/ops.py:add
+<span class="c">calc/ops.py:add  #uo6gamhvxd  suite #3np2azwdey
+  tests/test_ops.py:test_add  #7xdypxr7mu
+  tests/test_ops.py:test_add_negative  #i5mbin3kmt</span>
+<span class="p">&gt; </span>hs tests missing
+<span class="c">calc/ops.py:Calculator.__init__
+calc/ops.py:Calculator.clear
+2 definition(s) without test cases.</span>
+<span class="p">&gt; </span>hs tests suggest calc/ops.py:Calculator.clear     <span class="c"># tests that call it</span>
+<span class="p">&gt; </span>hs tests link calc/ops.py:Calculator.clear tests/test_ops.py:TestCalculator.test_apply
+<span class="p">&gt; </span>hs tests autolink                                  <span class="c"># link suggestions wherever nothing is linked</span></pre>
+<p>A test for a method can create the whole class, or a higher-level object that uses it. Link it to every method it is meant to check.</p>
+
+<h3>Verify, then push</h3>
+<p><code>hs verify</code> renders the working state to <code>.hs/verify/tree</code> and runs pytest on the tests that matter.
+Before the first push, that means everything:</p>
+<pre><span class="p">&gt; </span>hs verify
+<span class="c">  no tests                calc/ops.py:Calculator.__init__
+  1/1 passed              calc/ops.py:Calculator.apply
+  no tests                calc/ops.py:Calculator.clear
+  2/2 passed              calc/ops.py:add
+  1/1 passed              calc/ops.py:mul
+  warning: calc/ops.py:Calculator.__init__: no test cases linked
+  warning: calc/ops.py:Calculator.clear: no test cases linked
+Verification passed (4 tests run).</span></pre>
+<p>Results come one line per function: how many of its tests passed. Individual tests are listed only
+when they fail (<code>hs verify -v</code> lists them all).</p>
+<p>After that, verify checks only what the hub hasn't seen. After the <code>mul</code> edit, only its test runs:</p>
+<pre><span class="p">&gt; </span>hs verify
+<span class="c">  1/1 passed              calc/ops.py:mul
+Verification passed (1 test run).</span></pre>
+<h3>Impact testing</h3>
+<p>Verify also runs the tests of everything that <b>calls</b> what changed. Break <code>add</code>, and <code>mul</code>'s test runs too:</p>
+<pre><span class="p">&gt; </span>hs verify
+<span class="c">  also testing callers: calc/ops.py:mul</span>
+<span class="bad">  0/2 passed, 2 failed    calc/ops.py:add
+  0/1 passed, 1 failed    calc/ops.py:mul
+  FAIL  tests/test_ops.py:test_add
+  FAIL  tests/test_ops.py:test_add_negative
+  FAIL  tests/test_ops.py:test_mul</span>
+<span class="c">  failure: tests/test_ops.py:test_add: test failed
+  …
+Verification failed (3 tests run).</span>
+<span class="p">&gt; </span>hs push
+<span class="bad">hs: head #3thxoyazef is failing verification: run hs verify (it must pass) before pushing</span></pre>
+<p>Use <code>hs verify --json</code> to see each failing test's pytest output.</p>
+<h3>Test results per function</h3>
+<p><code>hs tests summary</code> shows the whole project the same way, failing functions first.
+Add a file or name prefix to narrow it, and <code>--problems</code> to hide everything that passes:</p>
+<pre><span class="p">&gt; </span>hs tests summary
+<span class="c">  no tests                    calc/ops.py:Calculator.__init__
+  no tests                    calc/ops.py:Calculator.clear
+  1/1 passed                  calc/ops.py:Calculator.apply
+  2/2 passed                  calc/ops.py:add
+  1/1 passed                  calc/ops.py:mul
+5 functions, 4/4 tests passed.</span></pre>
+<p>A function's numbers count only results on its current code and tests. The hub and every clone receive
+the results with each push and pull, so they all show the same numbers.</p>
+<div class="note"><b>How tests are run.</b>
+<ul>
+  <li>Each test file runs from its own project root: the nearest folder with <code>pytest.ini</code>, <code>pyproject.toml</code>, <code>setup.cfg</code> or <code>tox.ini</code>, otherwise the folder above its package and its <code>tests/</code> folder.</li>
+  <li>The command comes from <code>[tests] python</code> in the settings. Python bytecode caches are cleared first, so a test always runs the code being verified.</li>
+  <li><code>hs verify --all</code> checks every definition.</li>
+</ul></div>
+
+<h2 id="review"><span class="num">6</span>Reviewing changes</h2>
+<p>Every commit carries a <b>review flag</b>: <em>unreviewed</em>, <em>AI reviewed</em>, or <em>human reviewed</em>
+(and whether a person approved it). Reviews never block anything. Commit, verify, push and pull work the same either way.
+The flag records who has looked.</p>
+<h3>From the command line</h3>
+<pre><span class="p">&gt; </span>hs show head
+<span class="c">#pu3px2eie3  2026-11-15 02:44  alice
+    mul: reject negative multipliers
+    tests: passed   review: unreviewed
+
+  changed       calc/ops.py:mul   [1/1 passed]
+      @@ -1,4 +1,7 @@
+       def mul(a, b):</span>
+<span class="add">      +    """Multiply a by a non-negative integer b."""
+      +    if b &lt; 0:
+      +        raise ValueError("b must be non-negative")</span>
+<span class="c">           total = 0
+           for _ in range(b):
+               total = add(total, a)</span>
+<span class="p">&gt; </span>hs review head approve -m "negative b now raises; test_mul passes"
+<span class="c">Recorded your review of #pu3px2eie3: approved. Commit is now human approved.</span>
+<span class="p">&gt; </span>hs reviews
+<span class="c">#pu3px2eie3  human approved            mul: reject negative multipliers
+#myiw7fzhc3  unreviewed                Import the calc sample</span></pre>
+<p><code>hs show</code> gives the line diff of every changed function, module code (imports, constants) and deleted code,
+each function's test summary, and the reviews so far. <code>hs review</code> takes <code>approve</code>,
+<code>changes</code> or <code>comment</code>. A summary (<code>-m</code>) is needed unless you approve.
+<code>hs push</code> ends with how much of what it pushed a person has reviewed.</p>
+<div class="note"><b>Person or AI?</b> A review recorded in a normal terminal counts as a person's. Run under an AI agent
+(Claude Code and others are detected), it counts as an AI review. <code>HS_REVIEWER=human</code> or <code>ai</code> overrides this.
+Agents review through MCP with <code>hs_review</code>, which always counts as an AI review.</div>
+<h3>In the browser</h3>
+<pre><span class="p">&gt; </span>hs ui
+<span class="c">Review pages for calc: http://127.0.0.1:7421/ui/p/calc
+(Ctrl+C to stop)</span></pre>
+<p>This opens review pages for your local database, much like GitHub's:</p>
+<ul>
+  <li><b>Commits</b>: every commit with its test result and review flag, what is waiting for a person,
+  uncommitted changes, and functions with failing tests.</li>
+  <li><b>A commit</b>: a side-by-side-numbered diff per function, with its test summary (for example <code>18/20 passed</code>),
+  the reviews, and a form to approve, request changes or comment.</li>
+  <li><b>Tests</b>: every function's result with a pass/fail bar, failing ones first.</li>
+  <li><b>A function</b>: its code, each test's result on this code (with the pytest output when one fails), notes, context, callers and history.</li>
+</ul>
+<p>The hub serves the same pages for its copy at <code>http://&lt;hub&gt;:7420/ui</code>, and also lists pushes with how much of each a person reviewed.
+Reviews travel both ways: a review made locally is sent to the hub straight away (or with the next push), and reviews made on the hub arrive with <code>hs pull</code>.</p>
+<p>Where commits waiting for approval are listed is a setting: <code>[review] approval = "both"</code> (<code>local</code>, <code>hub</code>, <code>both</code> or <code>off</code>).
+On a shared hub, start it with <code>--review-token &lt;secret&gt;</code> so that only people you give the token to can record a person's review there.</p>
+
+<h2 id="history"><span class="num">7</span>History and rollback</h2>
+<p><code>hs log</code> shows commits. <code>hs history</code> shows every step, committed or not:</p>
+<pre><span class="p">&gt; </span>hs history -n 4
+<span class="c">* @14  2026-11-14 23:05  verify   failed: 3 tests, 3 failures
+  @13  2026-11-14 23:05  commit   Experiment
+  @12  2026-11-14 23:05  update   Experiment: subtract instead; stored calc/ops.py:add
+  @11  2026-11-14 23:05  push     pushed main to origin</span>
+<span class="p">&gt; </span>hs rollback @11
+<span class="c">Working state restored to @11 (push: pushed main to origin).
+The state before the rollback is still in hs history.</span>
+<span class="p">&gt; </span>hs view calc/ops.py:add
+<span class="c"># calc/ops.py:add  #uo6gamhvxd
+def add(a, b):
+    return a + b</span></pre>
+<p>The rollback is itself a step (<code>@15  rollback  back to @11</code>), and the experiment is still at <code>@12</code>–<code>@14</code>.
+Rollback changes the working state, which you then commit as usual. To undo the rollback, roll back to <code>@14</code>.
+<code>hs log calc/ops.py:mul</code> shows one function's history, and <code>hs diff --from head~1 --to head</code> compares commits.</p>
+
+<h2 id="notes"><span class="num">8</span>Notes and context</h2>
+<p>Notes cover a range of lines and are kept beside the code, not in it. <code>hs why</code> records context:
+where a function came from, design decisions, and requests.</p>
+<pre><span class="p">&gt; </span>hs note calc/ops.py:mul 2-4 "O(b) loop; fine for a demo, not for big numbers"
+<span class="c">Added note fc90ad8a to calc/ops.py:mul lines 2-4</span>
+<span class="p">&gt; </span>hs why calc/ops.py:mul "Multiply by repeated addition so the sample has a call graph" --kind origin
+<span class="c">Recorded origin context for calc/ops.py:mul</span></pre>
+<p>After the edit added three lines above it, the note moved down to lines 5–7 on its own:</p>
+<pre><span class="p">&gt; </span>hs context calc/ops.py:mul
+<span class="c">calc/ops.py:mul  (function, #4h6ldkv6ls)
+  def mul(a, b)
+  Multiply a by a non-negative integer b.
+
+Code:
+   1 | def mul(a, b):
+   2 |     """Multiply a by a non-negative integer b."""
+   3 |     if b &lt; 0:
+   4 |         raise ValueError("b must be non-negative")
+   5 |     total = 0
+   6 |     for _ in range(b):
+   7 |         total = add(total, a)
+   8 |     return total
+
+Notes:
+  [fc90ad8a] lines 5-7: O(b) loop; fine for a demo, not for big numbers
+
+Context:
+  2026-11-14 22:59  origin: Multiply by repeated addition so the sample has a call graph
+  2026-11-14 22:59  change: Reject negative b instead of silently returning 0
+
+Tests (suite #czeb6gl7kt):
+  tests/test_ops.py:test_mul
+
+Called by:
+  tests/test_ops.py:test_mul (line 2, exact)
+
+Calls:
+  calc/ops.py:add (exact)
+
+History:
+  #c4n53okjgb 2026-11-14 22:59 changed: mul: reject negative multipliers
+  #b5dpcitcko 2026-11-14 22:59 added: Import the calc sample</span></pre>
+<p>Context kinds are <code>origin</code>, <code>design</code>, <code>change</code> and <code>note</code>. <code>--source</code> records where it came from, such as a ticket or document.
+<code>hs note rm &lt;name&gt; &lt;id&gt;</code> removes a note.</p>
+
+<h2 id="graph"><span class="num">9</span>The call graph</h2>
+<pre><span class="p">&gt; </span>hs graph callers add
+<span class="c">calc/ops.py:mul  line 4  exact
+tests/test_ops.py:test_add  line 2  exact
+tests/test_ops.py:test_add_negative  line 2  exact</span>
+<span class="p">&gt; </span>hs graph callees calc/ops.py:mul
+<span class="c">line 3  range -&gt; ?  external
+line 4  add -&gt; calc/ops.py:add  exact</span></pre>
+<div class="tablewrap"><table>
+  <tr><th>Query</th><th>Answers</th></tr>
+  <tr><td><code>hs graph callers &lt;name&gt;</code></td><td>Who calls this?</td></tr>
+  <tr><td><code>hs graph callees &lt;name&gt;</code></td><td>What does this call?</td></tr>
+  <tr><td><code>hs graph impact &lt;name&gt; --depth 3</code></td><td>Everything that could break if this changes</td></tr>
+  <tr><td><code>hs graph reach &lt;name&gt;</code></td><td>Everything this can end up running</td></tr>
+  <tr><td><code>hs graph path &lt;from&gt; &lt;to&gt;</code></td><td>How one function reaches another</td></tr>
+  <tr><td><code>hs graph unused</code> / <code>cycles</code> / <code>entry</code></td><td>Dead code, recursion, entry points</td></tr>
+</table></div>
+<p class="muted">Each edge is marked <b>exact</b>, <b>likely</b>, <b>ambiguous</b> (several candidates) or <b>external</b> (outside the project).</p>
+
+<h2 id="hub"><span class="num">10</span>Working with a hub</h2>
+<h3>Start a hub</h3>
+<pre><span class="p">&gt; </span>hshub create calc --root D:\hashstash-hub
+<span class="p">&gt; </span>hshub serve --root D:\hashstash-hub --port 7420</pre>
+<p>The hub listens on <code>127.0.0.1</code> by default. To share it on your network, add <code>--host 0.0.0.0</code>, and
+<code>--token &lt;secret&gt;</code> so that only clients with <code>HS_TOKEN=&lt;secret&gt;</code> set can connect.
+Open <code>http://localhost:7420/</code> to see the hosted projects.</p>
+<h3>Push</h3>
+<pre><span class="p">&gt; </span>hs remote add origin http://localhost:7420/calc
+<span class="p">&gt; </span>hs verify
+<span class="p">&gt; </span>hs push
+<span class="c">Pushed main #b5dpcitcko to origin (16 objects uploaded).</span></pre>
+<h3>Clone and pull</h3>
+<pre><span class="p">&gt; </span>hs clone http://localhost:7420/calc calc-bob
+<span class="c">Cloned http://localhost:7420/calc into C:/…/calc-bob: fast-forward to #b5dpcitcko</span>
+<span class="p">&gt; </span>cd calc-bob
+<span class="p">&gt; </span>hs pull
+<span class="c">fast-forward to #c4n53okjgb (5 objects fetched, 1 hub locks)</span></pre>
+<p>Only missing objects are sent each way. After the import, the <code>mul</code> edit pushed 5 objects, not the whole project.</p>
+<div class="note"><b>Who am I?</b> Set your name with <code>HS_AGENT</code> (or <code>--as &lt;name&gt;</code> on any command). Commits, locks and
+history are recorded under it. Give every agent its own name.</div>
+
+<h2 id="locks"><span class="num">11</span>Locks</h2>
+<p>A lock reserves definitions for one agent. <code>hs edit</code> takes locks automatically, and <code>hs commit</code> releases them
+(<code>--keep-locks</code> keeps them). When the project has an <code>origin</code> remote, locks are taken on the hub, so they
+apply to everyone:</p>
+<pre><span class="c"># bob</span>
+<span class="p">&gt; </span>hs lock calc/ops.py:Calculator.clear
+<span class="c">Locked calc/ops.py:Calculator.clear until 2026-11-14 23:14</span>
+<span class="c"># alice</span>
+<span class="p">&gt; </span>hs lock calc/ops.py:Calculator.clear
+<span class="bad">hs: calc/ops.py:Calculator.clear is locked on the hub by bob</span></pre>
+<ul>
+  <li><code>hs locks</code> lists locks, and <code>hs unlock &lt;name&gt;</code> releases one. <code>hs unlock --force</code> breaks someone else's lock.</li>
+  <li>Locks expire after <code>[locks] minutes</code> unless renewed. Editing renews them.</li>
+  <li>The hub refuses any push that changes a definition someone else has locked.</li>
+  <li><code>HS_OFFLINE=1</code> skips the hub, for working without a connection.</li>
+</ul>
+
+<h2 id="publish"><span class="num">12</span>Publishing to git (nightly builds)</h2>
+<p>The hub can render a branch into a normal git repository and push it, for example to GitHub. Anyone can then clone,
+build and browse plain source files, and every published commit corresponds to a verified hashstash state.</p>
+<ol class="steps">
+  <li>Add a <code>[publish]</code> section to the hub project's settings, <code>D:\hashstash-hub\calc\.hs\config.toml</code>:
+<pre>[publish]
+git_dir = "../calc-publish"                         <span class="c"># working copy, created on first use</span>
+remote  = "https://github.com/you/calc.git"         <span class="c"># or a local bare repo path</span>
+branch  = "nightly"
+on_push = true                                      <span class="c"># publish after every accepted push</span></pre></li>
+  <li>Publish by hand at any time:
+<pre><span class="p">&gt; </span>hshub publish calc --root D:\hashstash-hub
+<span class="c">{
+  "changed": true,
+  "commit": "dsardkmbte",
+  "deleted": 0,
+  "dir": "D:/hashstash-hub/calc/../calc-publish",
+  "git_commit": "00b6b34",
+  "pushed": "origin/nightly",
+  "written": 3
+}</span></pre>
+  The git commit lists the hashstash commits since the last publish:
+<pre><span class="p">&gt; </span>git log -1 --format=%B nightly
+<span class="c">hashstash publish #dsardkmbte (main)
+
+- mul: reject negative multipliers (#dsardkmbte, alice)
+- Import the calc sample (#t4vmgaayks, alice)</span></pre>
+  A fresh clone of <code>nightly</code> holds the plain files, and <code>pytest</code> passes on them.</li>
+  <li>Or once a night with Task Scheduler, instead of <code>on_push</code>:
+<pre><span class="p">&gt; </span>schtasks /Create /SC DAILY /ST 02:00 /TN "hashstash nightly calc" ^
+    /TR "C:\Projects\hashstash\build\hshub.exe publish calc --root D:\hashstash-hub"</pre></li>
+</ol>
+<div class="warn"><b>Use a separate branch.</b> Publishing replaces every file on the target branch with the rendered tree.
+Point it at a branch like <code>nightly</code>, and merge into <code>main</code> on GitHub when you choose to release.
+Git needs credentials for the remote (Git Credential Manager handles this for GitHub).</div>
+<p>For a single project without a hub, the same <code>[publish]</code> section in the project's own <code>.hs/config.toml</code> works with <code>hs publish</code>.</p>
+
+<h2 id="agents"><span class="num">13</span>Connecting AI agents (MCP)</h2>
+<p>Agents use the same functions through MCP. The tools describe themselves, so the agent needs no extra instructions.</p>
+<h3>Local project (stdio)</h3>
+<p><code>hs mcp</code> serves the project found in or above the folder it starts in. With Claude Code, run this in the project folder:</p>
+<pre><span class="p">&gt; </span>claude mcp add hashstash -- hs mcp</pre>
+<p>Or check a <code>.mcp.json</code> into the project:</p>
+<pre>{
+  "mcpServers": {
+    "hashstash": { "command": "hs", "args": ["mcp"], "env": { "HS_AGENT": "claude" } }
+  }
+}</pre>
+<h3>Directly on the hub (HTTP)</h3>
+<p>For agents without a local copy:</p>
+<pre><span class="p">&gt; </span>claude mcp add --transport http hashstash-hub http://localhost:7420/mcp/calc</pre>
+<h3>The tools</h3>
+<div class="tablewrap"><table>
+  <tr><th>Area</th><th>Tools</th></tr>
+  <tr><td>Browse</td><td><code>hs_status</code> <code>hs_find</code> <code>hs_list</code> <code>hs_view</code> <code>hs_context</code> <code>hs_graph</code></td></tr>
+  <tr><td>Edit</td><td><code>hs_lock</code> <code>hs_unlock</code> <code>hs_locks</code> <code>hs_edit_def</code> <code>hs_add_def</code> <code>hs_delete_def</code></td></tr>
+  <tr><td>Tests</td><td><code>hs_tests</code> <code>hs_test_summary</code> <code>hs_link_tests</code> <code>hs_unlink_tests</code> <code>hs_missing_tests</code> <code>hs_verify</code></td></tr>
+  <tr><td>Context</td><td><code>hs_note</code> <code>hs_why</code></td></tr>
+  <tr><td>History</td><td><code>hs_diff</code> <code>hs_commit</code> <code>hs_log</code> <code>hs_history</code> <code>hs_rollback</code> <code>hs_render</code></td></tr>
+  <tr><td>Review</td><td><code>hs_show</code> <code>hs_review</code> <code>hs_reviews</code></td></tr>
+  <tr><td>Sync</td><td><code>hs_remotes</code> <code>hs_pull</code> <code>hs_push</code> <code>hs_publish</code></td></tr>
+</table></div>
+<p class="muted">Every edit through MCP needs a <code>reason</code>, which is saved as change context. Responses warn about long definitions and missing tests.
+<code>hs_commit</code> returns the line diff it committed, so the agent (and you, reading along) can confirm it stored what was intended;
+the agent then records its review with <code>hs_review</code>.</p>
+
+<h2 id="config"><span class="num">14</span>Settings</h2>
+<p>Each project has <code>.hs/config.toml</code>. These are the defaults <code>hs init</code> writes:</p>
+<pre>[project]
+name = "calc"
+
+[user]
+# author = "Your Name"
+
+[size]
+warn_lines = 60   <span class="c"># warn when a definition is longer than this</span>
+max_lines  = 0    <span class="c"># refuse longer definitions (0 = never refuse)</span>
+
+[locks]
+minutes = 15      <span class="c"># a lock expires unless renewed within this time</span>
+
+[tests]
+require = "warn"  <span class="c"># every function/method needs linked test cases: off | warn | block</span>
+# exempt = ["__repr__", "_*"]   <span class="c"># short names that need no tests</span>
+python = "python -m pytest -q {tests}"   <span class="c"># how hs verify runs Python tests</span>
+impact_depth = 3  <span class="c"># verify also runs the tests of callers up to this many levels away (0 = off)</span>
+
+[history]
+keep = 500        <span class="c"># lifecycle steps kept per branch for rollback (0 = keep all)</span>
+
+[review]
+approval = "both" <span class="c"># where commits waiting for a person are listed: local | hub | both | off</span>
+
+[import]
+# ignore = ["*.min.js", "data/**"]
+
+[publish]
+# git_dir = "../myproject-git"
+# remote  = "origin"
+# branch  = "main"
+# on_push = false</pre>
+<div class="tablewrap"><table>
+  <tr><th>Environment variable</th><th>Meaning</th></tr>
+  <tr><td><code>HS_AGENT</code></td><td>Your agent or user name (same as <code>--as</code>)</td></tr>
+  <tr><td><code>HS_TOKEN</code></td><td>Token sent to a hub started with <code>--token</code></td></tr>
+  <tr><td><code>HS_HUB_TOKEN</code></td><td>Token the hub requires (same as <code>hshub serve --token</code>)</td></tr>
+  <tr><td><code>HS_OFFLINE</code></td><td>Set to <code>1</code> to skip hub locks while offline</td></tr>
+  <tr><td><code>HS_REVIEWER</code></td><td><code>human</code> or <code>ai</code>: how <code>hs review</code> records your review (normally detected)</td></tr>
+  <tr><td><code>HS_HUB_REVIEW_TOKEN</code></td><td>Token the hub's pages ask for before recording a person's review (same as <code>--review-token</code>)</td></tr>
+</table></div>
+
+<h2 id="commands"><span class="num">15</span>Command list</h2>
+<p><code>hs help</code> prints this list. <code>--json</code> on any command gives machine-readable output.</p>
+<div class="tablewrap"><table>
+  <tr><th>Command</th><th>Does</th></tr>
+  <tr><td><code>hs init [name]</code></td><td>Create a store (<code>.hs/</code>) here</td></tr>
+  <tr><td><code>hs import &lt;path&gt; [--prefix dir]</code></td><td>Bring in existing code: split, index, graph, link tests</td></tr>
+  <tr><td><code>hs render [--out dir] [--at ref]</code></td><td>Write source files (default <code>./out</code>)</td></tr>
+  <tr><td><code>hs status</code></td><td>Uncommitted changes, locks, open edits</td></tr>
+  <tr><td><code>hs ls</code> · <code>view</code> · <code>find</code> · <code>context</code></td><td>Browse</td></tr>
+  <tr><td><code>hs edit &lt;name&gt;…</code> · <code>new</code> · <code>update [-m reason]</code> · <code>rm</code></td><td>Edit through scratch files</td></tr>
+  <tr><td><code>hs diff [name] [--from r] [--to r] [--stat]</code></td><td>Per-definition diff</td></tr>
+  <tr><td><code>hs commit -m "…" [--keep-locks]</code></td><td>Commit; a message is required</td></tr>
+  <tr><td><code>hs log [name] [-n N]</code></td><td>Commit history, for the project or one definition</td></tr>
+  <tr><td><code>hs history [-n N]</code> · <code>hs rollback @id</code></td><td>Lifecycle steps; restore without losing the latest</td></tr>
+  <tr><td><code>hs verify [--all] [-v]</code></td><td>Policy checks and tests, one line per function; required before push</td></tr>
+  <tr><td><code>hs show [commit]</code></td><td>A commit's per-function diffs, test summaries and reviews</td></tr>
+  <tr><td><code>hs review [commit] approve|changes|comment [-m text]</code></td><td>Record your review</td></tr>
+  <tr><td><code>hs reviews [-n N]</code></td><td>Review flags of recent commits</td></tr>
+  <tr><td><code>hs ui [--port 7421] [--no-open]</code></td><td>Review pages in the browser</td></tr>
+  <tr><td><code>hs tests …</code></td><td>Show, <code>link</code>, <code>unlink</code>, <code>suggest</code>, <code>autolink</code>, <code>missing</code>, <code>summary</code></td></tr>
+  <tr><td><code>hs note</code> · <code>hs why</code></td><td>Region notes and context</td></tr>
+  <tr><td><code>hs lock</code> · <code>unlock</code> · <code>locks</code></td><td>Locks</td></tr>
+  <tr><td><code>hs graph …</code></td><td>Call graph queries</td></tr>
+  <tr><td><code>hs remote add</code> · <code>clone</code> · <code>push</code> · <code>pull</code></td><td>Hub sync</td></tr>
+  <tr><td><code>hs publish [branch]</code></td><td>Render into the <code>[publish]</code> git repository, commit and push</td></tr>
+  <tr><td><code>hs mcp</code></td><td>MCP server over stdio</td></tr>
+</table></div>
+<p class="muted">Refs: <code>work</code>, <code>head</code>, <code>head~N</code>, <code>@&lt;history id&gt;</code>, or a commit hash prefix.</p>
+
+<h2 id="trouble"><span class="num">16</span>When something is refused</h2>
+<div class="tablewrap"><table>
+  <tr><th>Message</th><th>What to do</th></tr>
+  <tr><td><code>head … is not verified</code></td><td>Run <code>hs verify</code>, then push again.</td></tr>
+  <tr><td><code>head … is failing verification</code></td><td>Fix the failing tests (<code>hs verify --json</code> shows pytest output), or <code>hs rollback</code>.</td></tr>
+  <tr><td><code>… is locked on the hub by bob</code></td><td>Wait, ask bob, or let the lock expire. <code>hs locks</code> shows when.</td></tr>
+  <tr><td><code>the hub's main has commits you don't have: pull first</code></td><td>Someone pushed first. Run <code>hs pull</code>, verify, and push again.</td></tr>
+  <tr><td><code>you have uncommitted changes: commit them, then pull</code></td><td>Commit (or roll back) first, then pull.</td></tr>
+  <tr><td><code>your main and the hub's have diverged; merging is not supported yet</code></td><td>You and someone else both committed. Merging is the next feature. Until then, roll back to the last pulled state, pull, and redo your edit on top.</td></tr>
+  <tr><td><code>… changed since it was opened</code> on update</td><td>Someone else changed the function after you opened it. Run <code>hs edit</code> again to get the current version.</td></tr>
+  <tr><td><code>hub … unreachable</code></td><td>Start <code>hshub serve</code>, or check the remote URL with <code>hs remote add origin &lt;url&gt;</code>.</td></tr>
+  <tr><td>A test passes locally but fails in verify</td><td>Verify runs from the rendered tree, from the project root described in <a href="#tests">section 5</a>. Check that the test doesn't depend on files that weren't imported.</td></tr>
+</table></div>
+</main>
+
+<footer><div class="inner">hashstash: version control for AI/SI agentic coding. <a href="index.html">Concept</a> · <a href="DESIGN.md">Design notes</a></div></footer>
+</body>
+</html>

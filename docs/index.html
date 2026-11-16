@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hashstash concept</title>
+<meta name="description" content="hashstash: version control for AI/SI agentic coding. Code is stored as functions and classes, not files.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><div class="inner">
+  <a class="brand" href="index.html">hash<span>stash</span></a>
+  <nav>
+    <a href="index.html" aria-current="page">Concept</a>
+    <a href="guide.html">Manual</a>
+    <a href="DESIGN.md">Design notes</a>
+  </nav>
+</div></header>
+
+<main>
+<section class="hero">
+  <p class="tag">Version control for AI/SI agentic coding</p>
+  <h1>Version control that stores functions, not files.</h1>
+  <p class="lead">hashstash keeps your code as a database of definitions: every function,
+  method and class, each with its own hash, history, tests, notes and lock. Ordinary
+  source files are generated from it whenever you need them, ready to build, run or push to GitHub.
+  It works with Python and C/C++.</p>
+</section>
+
+<div class="cards">
+  <div class="card"><h3>Function-level history</h3><p>Commits, diffs, blame and rollback per definition, with line-by-line diffs inside each one.</p></div>
+  <div class="card"><h3>Built for agents</h3><p>An MCP server exposes everything as tools, so an AI agent can browse, lock, edit, test and push without a skill file.</p></div>
+  <div class="card"><h3>Tests travel with code</h3><p>Every function links to the tests written for it. Pushes must pass them, including the tests of anything that calls it.</p></div>
+  <div class="card"><h3>Plain files out</h3><p>Rendering gives byte-identical source files, so git, compilers and GitHub never notice anything unusual.</p></div>
+</div>
+
+<h2 id="files"><span class="num">1</span>Files go in, definitions come out</h2>
+<p><code>hs import</code> parses each file with tree-sitter and stores every definition as its
+own object. The text between definitions (imports, comments, module code) is kept too,
+so nothing is lost.</p>
+<div class="figure">
+<svg viewBox="0 0 900 330" role="img" aria-labelledby="f1t">
+  <title id="f1t">A Python file split into stored definitions</title>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowfill"/></marker>
+  </defs>
+  <text x="20" y="24" font-weight="600">calc/ops.py</text>
+  <rect x="20" y="36" width="300" height="280" rx="10" class="box"/>
+  <rect x="34" y="50" width="272" height="30" rx="6" class="glue"/>
+  <text x="46" y="70" class="mono muted" font-size="13">"""Arithmetic helpers."""</text>
+  <rect x="34" y="88" width="272" height="40" rx="6" class="def"/>
+  <text x="46" y="113" class="mono deftext" font-size="13">def add(a, b): …</text>
+  <rect x="34" y="136" width="272" height="56" rx="6" class="def"/>
+  <text x="46" y="161" class="mono deftext" font-size="13">def mul(a, b):</text>
+  <text x="62" y="180" class="mono deftext" font-size="13">… add(total, a) …</text>
+  <rect x="34" y="200" width="272" height="104" rx="6" class="def"/>
+  <text x="46" y="222" class="mono deftext" font-size="13">class Calculator:</text>
+  <rect x="58" y="230" width="236" height="20" rx="4" class="def"/>
+  <text x="68" y="245" class="mono deftext" font-size="12">def __init__(self)</text>
+  <rect x="58" y="254" width="236" height="20" rx="4" class="def"/>
+  <text x="68" y="269" class="mono deftext" font-size="12">def apply(self, op, x)</text>
+  <rect x="58" y="278" width="236" height="20" rx="4" class="def"/>
+  <text x="68" y="293" class="mono deftext" font-size="12">def clear(self)</text>
+
+  <line x1="336" y1="176" x2="430" y2="176" class="line" marker-end="url(#ar)"/>
+  <text x="383" y="166" text-anchor="middle" class="mono" font-size="14">hs import</text>
+
+  <text x="450" y="24" font-weight="600">.hs/ store (one object per definition)</text>
+  <g font-size="13">
+    <rect x="450" y="40" width="210" height="58" rx="8" class="def"/>
+    <text x="462" y="62" class="mono deftext">calc/ops.py:add</text>
+    <text x="462" y="84" class="mono muted" font-size="12">#uo6gamhv · lineage a91f…</text>
+    <rect x="672" y="40" width="210" height="58" rx="8" class="def"/>
+    <text x="684" y="62" class="mono deftext">calc/ops.py:mul</text>
+    <text x="684" y="84" class="mono muted" font-size="12">#5xp6l2zx · lineage 7c1e…</text>
+    <rect x="450" y="110" width="210" height="58" rx="8" class="def"/>
+    <text x="462" y="132" class="mono deftext">…:Calculator</text>
+    <text x="462" y="154" class="mono muted" font-size="12">#jcvqt7y7 · lineage 03bd…</text>
+    <rect x="672" y="110" width="210" height="58" rx="8" class="def"/>
+    <text x="684" y="132" class="mono deftext">…:Calculator.apply</text>
+    <text x="684" y="154" class="mono muted" font-size="12">#vhybmn47 · lineage e45a…</text>
+    <rect x="450" y="180" width="432" height="44" rx="8" class="glue"/>
+    <text x="462" y="207" class="muted">file object: the order of text and definitions (the “crumbtrail”)</text>
+    <rect x="450" y="236" width="432" height="80" rx="8" class="acc"/>
+    <text x="462" y="258" class="acctext" font-weight="600">Index, built automatically</text>
+    <text x="462" y="280" class="muted">names · signatures · docstrings · full-text search</text>
+    <text x="462" y="300" class="muted">call graph: mul → add (exact), add ← test_add …</text>
+  </g>
+</svg>
+<div class="cap">Nested definitions (methods inside a class) are their own objects too. The class keeps a reference to each.</div>
+</div>
+
+<h2 id="identity"><span class="num">2</span>Two identities for every definition</h2>
+<p>Each definition has a <b>content hash</b>, which changes with every edit, and a <b>lineage ID</b>,
+which never changes, even through renames. Tests, notes, locks and history attach to the lineage,
+so they follow the function wherever it goes.</p>
+<div class="figure">
+<svg viewBox="0 0 900 250" role="img" aria-labelledby="f2t">
+  <title id="f2t">Content hashes change per version; the lineage stays the same</title>
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowfill"/></marker>
+  </defs>
+  <g font-size="13">
+    <rect x="20" y="20" width="230" height="74" rx="8" class="def"/>
+    <text x="34" y="44" class="mono deftext">def mul(a, b)</text>
+    <text x="34" y="64" class="muted">version 1 (import)</text>
+    <text x="34" y="84" class="mono" font-size="12">#5xp6l2zx</text>
+    <rect x="335" y="20" width="230" height="74" rx="8" class="def"/>
+    <text x="349" y="44" class="mono deftext">def mul(a, b)</text>
+    <text x="349" y="64" class="muted">version 2 (rejects b &lt; 0)</text>
+    <text x="349" y="84" class="mono" font-size="12">#4h6ldkv6</text>
+    <rect x="650" y="20" width="230" height="74" rx="8" class="def"/>
+    <text x="664" y="44" class="mono deftext">def times(a, b)</text>
+    <text x="664" y="64" class="muted">version 3 (renamed)</text>
+    <text x="664" y="84" class="mono" font-size="12">#q2m7r0ba</text>
+  </g>
+  <line x1="254" y1="57" x2="330" y2="57" class="line" marker-end="url(#ar2)"/>
+  <line x1="569" y1="57" x2="645" y2="57" class="line" marker-end="url(#ar2)"/>
+  <rect x="20" y="118" width="860" height="38" rx="19" class="acc"/>
+  <text x="450" y="142" text-anchor="middle" class="acctext" font-weight="600">lineage 7c1e… : the same function the whole time</text>
+  <g font-size="13">
+    <rect x="20"  y="184" width="160" height="44" rx="8" class="box"/><text x="100" y="211" text-anchor="middle">linked tests</text>
+    <rect x="195" y="184" width="160" height="44" rx="8" class="box"/><text x="275" y="211" text-anchor="middle">region notes</text>
+    <rect x="370" y="184" width="160" height="44" rx="8" class="box"/><text x="450" y="211" text-anchor="middle">locks</text>
+    <rect x="545" y="184" width="160" height="44" rx="8" class="box"/><text x="625" y="211" text-anchor="middle">“why” context</text>
+    <rect x="720" y="184" width="160" height="44" rx="8" class="box"/><text x="800" y="211" text-anchor="middle">change history</text>
+  </g>
+  <g class="line">
+    <line x1="100" y1="160" x2="100" y2="182"/><line x1="275" y1="160" x2="275" y2="182"/>
+    <line x1="450" y1="160" x2="450" y2="182"/><line x1="625" y1="160" x2="625" y2="182"/>
+    <line x1="800" y1="160" x2="800" y2="182"/>
+  </g>
+</svg>
+<div class="cap">The same content always hashes the same, so identical code is stored once, and sync only sends hashes the other side doesn't already have.
+(Versions 1 and 2 are real hashes from the manual's walkthrough; the rename and the lineage IDs are illustrative.)</div>
+</div>
+
+<h2 id="render"><span class="num">3</span>Rendering back to files</h2>
+<p>Each file is stored as an ordered list of text and definition references: its crumbtrail.
+<code>hs render</code> walks it and writes the file back <b>byte for byte</b>, comments, blank lines and
+line endings included. Tested on the whole Python standard library (12,893 files) and on
+hashstash's own C/C++ sources, with zero mismatches.</p>
+<div class="figure">
+<svg viewBox="0 0 900 150" role="img" aria-labelledby="f3t">
+  <title id="f3t">A crumbtrail rendering to a file</title>
+  <defs>
+    <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowfill"/></marker>
+  </defs>
+  <g font-size="13">
+    <rect x="20"  y="40" width="120" height="44" rx="6" class="glue"/><text x="80"  y="67" text-anchor="middle" class="muted">text</text>
+    <rect x="146" y="40" width="100" height="44" rx="6" class="def"/><text x="196" y="67" text-anchor="middle" class="mono deftext">→ add</text>
+    <rect x="252" y="40" width="60"  height="44" rx="6" class="glue"/><text x="282" y="67" text-anchor="middle" class="muted">text</text>
+    <rect x="318" y="40" width="100" height="44" rx="6" class="def"/><text x="368" y="67" text-anchor="middle" class="mono deftext">→ mul</text>
+    <rect x="424" y="40" width="60"  height="44" rx="6" class="glue"/><text x="454" y="67" text-anchor="middle" class="muted">text</text>
+    <rect x="490" y="40" width="130" height="44" rx="6" class="def"/><text x="555" y="67" text-anchor="middle" class="mono deftext">→ Calculator</text>
+  </g>
+  <text x="20" y="26" font-weight="600" font-size="14">file object for calc/ops.py</text>
+  <line x1="630" y1="62" x2="700" y2="62" class="line" marker-end="url(#ar3)"/>
+  <text x="665" y="52" text-anchor="middle" class="mono" font-size="13">render</text>
+  <rect x="710" y="24" width="170" height="80" rx="8" class="box"/>
+  <text x="795" y="58" text-anchor="middle" class="mono" font-size="14">calc/ops.py</text>
+  <text x="795" y="80" text-anchor="middle" class="muted" font-size="13">identical bytes</text>
+  <text x="20" y="126" class="muted" font-size="13">Labels (project / file / class / function) and their order decide where each definition is written.</text>
+</svg>
+</div>
+
+<h2 id="loop"><span class="num">4</span>The working loop</h2>
+<p>The code lives in the store, not in files. <b>Checking out</b> a function means locking it and opening
+it in a scratch file. You edit there, then store it back. Agents do the same through MCP tools.</p>
+<div class="figure">
+<svg viewBox="0 0 900 240" role="img" aria-labelledby="f4t">
+  <title id="f4t">edit, update, commit, verify, push</title>
+  <defs>
+    <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowfill"/></marker>
+    <marker id="ar4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="badfill"/></marker>
+  </defs>
+  <g font-size="14">
+    <rect x="20"  y="40" width="140" height="74" rx="10" class="def"/>
+    <text x="90" y="70" text-anchor="middle" class="mono deftext" font-weight="600">hs edit</text>
+    <text x="90" y="94" text-anchor="middle" class="muted" font-size="12">lock + scratch file</text>
+    <rect x="200" y="40" width="140" height="74" rx="10" class="def"/>
+    <text x="270" y="70" text-anchor="middle" class="mono deftext" font-weight="600">hs update</text>
+    <text x="270" y="94" text-anchor="middle" class="muted" font-size="12">store + reason</text>
+    <rect x="380" y="40" width="140" height="74" rx="10" class="def"/>
+    <text x="450" y="70" text-anchor="middle" class="mono deftext" font-weight="600">hs commit</text>
+    <text x="450" y="94" text-anchor="middle" class="muted" font-size="12">message required</text>
+    <rect x="560" y="40" width="140" height="74" rx="10" class="warnbox"/>
+    <text x="630" y="70" text-anchor="middle" class="mono" font-weight="600">hs verify</text>
+    <text x="630" y="94" text-anchor="middle" class="muted" font-size="12">policy + tests</text>
+    <rect x="740" y="40" width="140" height="74" rx="10" class="acc"/>
+    <text x="810" y="70" text-anchor="middle" class="mono acctext" font-weight="600">hs push</text>
+    <text x="810" y="94" text-anchor="middle" class="muted" font-size="12">to the hub</text>
+  </g>
+  <line x1="162" y1="77" x2="196" y2="77" class="line" marker-end="url(#ar4)"/>
+  <line x1="342" y1="77" x2="376" y2="77" class="line" marker-end="url(#ar4)"/>
+  <line x1="522" y1="77" x2="556" y2="77" class="line" marker-end="url(#ar4)"/>
+  <line x1="702" y1="77" x2="736" y2="77" class="accline" marker-end="url(#ar4)"/>
+  <text x="719" y="66" text-anchor="middle" class="acctext" font-size="12">pass</text>
+  <path d="M630,118 C630,190 90,190 90,120" class="badline dash" marker-end="url(#ar4b)"/>
+  <text x="360" y="200" text-anchor="middle" class="badtext" font-size="13">fail: the push is refused; fix it, or roll back</text>
+  <text x="20" y="232" class="muted" font-size="13">Locks are released on commit. Every step is recorded in the lifecycle history.</text>
+</svg>
+</div>
+
+<h2 id="tests"><span class="num">5</span>Every function has tests, and pushes must pass them</h2>
+<p>Tests are linked to the definitions they exercise. One function can have many tests, and methods
+count too. Import links tests automatically from the call graph, and a function with no tests gets a warning (or blocks, if you choose).
+Before a push, <code>hs verify</code> renders the code and runs:</p>
+<ul>
+  <li>the tests linked to everything the hub hasn't seen yet;</li>
+  <li>the tests of everything that <b>calls</b> those definitions, found through the call graph (up to 3 levels by default).</li>
+</ul>
+<div class="figure">
+<svg viewBox="0 0 900 230" role="img" aria-labelledby="f5t">
+  <title id="f5t">Changing add also runs the tests of mul, which calls add</title>
+  <defs>
+    <marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowfill"/></marker>
+  </defs>
+  <g font-size="14">
+    <rect x="330" y="20" width="200" height="56" rx="10" class="badbox"/>
+    <text x="430" y="45" text-anchor="middle" class="mono badtext" font-weight="600">add  (changed)</text>
+    <text x="430" y="64" text-anchor="middle" class="muted" font-size="12">return a - b</text>
+    <rect x="620" y="20" width="200" height="56" rx="10" class="def"/>
+    <text x="720" y="45" text-anchor="middle" class="mono deftext" font-weight="600">mul</text>
+    <text x="720" y="64" text-anchor="middle" class="muted" font-size="12">calls add</text>
+  </g>
+  <line x1="616" y1="48" x2="534" y2="48" class="defline" marker-end="url(#ar5)"/>
+  <text x="575" y="38" text-anchor="middle" class="muted" font-size="12">calls</text>
+  <g font-size="13">
+    <rect x="200" y="140" width="170" height="40" rx="8" class="badbox"/><text x="285" y="165" text-anchor="middle" class="mono">test_add ✗</text>
+    <rect x="390" y="140" width="210" height="40" rx="8" class="badbox"/><text x="495" y="165" text-anchor="middle" class="mono">test_add_negative ✗</text>
+    <rect x="640" y="140" width="160" height="40" rx="8" class="badbox"/><text x="720" y="165" text-anchor="middle" class="mono">test_mul ✗</text>
+  </g>
+  <g class="line dash">
+    <line x1="400" y1="78" x2="300" y2="138"/><line x1="460" y1="78" x2="490" y2="138"/>
+    <line x1="720" y1="78" x2="720" y2="138"/>
+  </g>
+  <text x="20" y="112" class="muted" font-size="13">linked tests</text>
+  <text x="20" y="214" font-size="13">Without impact testing, <tspan class="mono">test_mul</tspan> would never run, and a broken <tspan class="mono">mul</tspan> would reach the hub.</text>
+</svg>
+<div class="cap">Each function also gets a <b>suite hash</b> (its hash plus its tests' hashes), so test results are tied to the exact code they checked.</div>
+</div>
+
+<h2 id="notes"><span class="num">6</span>Notes and context live beside the code</h2>
+<p>Comments on a line range are stored next to a definition, not inside it, so they never clutter the code or
+cause merge noise. Regions can overlap, and they move when lines are inserted above them. Each
+definition also keeps its <b>context</b>: the original request, design snippets and the reason for every change.</p>
+<div class="figure">
+<svg viewBox="0 0 900 250" role="img" aria-labelledby="f6t">
+  <title id="f6t">A note moving with its lines after an edit</title>
+  <defs>
+    <marker id="ar6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowfill"/></marker>
+  </defs>
+  <g font-size="13" class="mono">
+    <text x="20" y="22" font-weight="600" class="" style="font-family:var(--sans)">before</text>
+    <rect x="20" y="34" width="330" height="130" rx="8" class="box"/>
+    <text x="34" y="58" class="muted">1</text><text x="58" y="58">def mul(a, b):</text>
+    <rect x="28" y="66" width="314" height="72" rx="4" class="warnbox"/>
+    <text x="34" y="84" class="muted">2</text><text x="58" y="84">    total = 0</text>
+    <text x="34" y="106" class="muted">3</text><text x="58" y="106">    for _ in range(b):</text>
+    <text x="34" y="128" class="muted">4</text><text x="58" y="128">        total = add(total, a)</text>
+    <text x="34" y="154" class="muted">5</text><text x="58" y="154">    return total</text>
+
+    <text x="480" y="22" font-weight="600" style="font-family:var(--sans)">after inserting 3 lines</text>
+    <rect x="480" y="34" width="400" height="206" rx="8" class="box"/>
+    <text x="494" y="58" class="muted">1</text><text x="518" y="58">def mul(a, b):</text>
+    <text x="494" y="80" class="muted">2</text><text x="518" y="80" class="acctext">    """Multiply a by …"""</text>
+    <text x="494" y="102" class="muted">3</text><text x="518" y="102" class="acctext">    if b &lt; 0:</text>
+    <text x="494" y="124" class="muted">4</text><text x="518" y="124" class="acctext">        raise ValueError(…)</text>
+    <rect x="488" y="132" width="384" height="72" rx="4" class="warnbox"/>
+    <text x="494" y="150" class="muted">5</text><text x="518" y="150">    total = 0</text>
+    <text x="494" y="172" class="muted">6</text><text x="518" y="172">    for _ in range(b):</text>
+    <text x="494" y="194" class="muted">7</text><text x="518" y="194">        total = add(total, a)</text>
+    <text x="494" y="226" class="muted">8</text><text x="518" y="226">    return total</text>
+  </g>
+  <line x1="360" y1="100" x2="470" y2="166" class="line" marker-end="url(#ar6)"/>
+  <rect x="20" y="182" width="330" height="58" rx="8" class="warnbox"/>
+  <text x="34" y="205" font-size="13">note on lines 2–4 → now 5–7:</text>
+  <text x="34" y="226" font-size="13" class="muted">“O(b) loop; fine for a demo”</text>
+</svg>
+<div class="cap">Real output from the manual's walkthrough: <code>hs context calc/ops.py:mul</code> shows the note at lines 5–7 after the edit.</div>
+</div>
+
+<h2 id="history"><span class="num">7</span>History never loses work</h2>
+<p>Besides commits, hashstash records a <b>lifecycle history</b> of every step: import, update, commit, verify, push, note.
+Rolling back restores an earlier state by adding a <i>new</i> step, so the state you rolled back from is still there
+to return to. <code>[history] keep</code> sets how many steps are kept.</p>
+<div class="figure">
+<svg viewBox="0 0 900 170" role="img" aria-labelledby="f7t">
+  <title id="f7t">Rollback adds a step instead of deleting</title>
+  <line x1="40" y1="60" x2="860" y2="60" class="line"/>
+  <g font-size="12">
+    <circle cx="80"  cy="60" r="9" class="acc"/><text x="80"  y="40" text-anchor="middle" class="mono">@11</text><text x="80"  y="90" text-anchor="middle">push</text>
+    <circle cx="240" cy="60" r="9" class="def"/><text x="240" y="40" text-anchor="middle" class="mono">@12</text><text x="240" y="90" text-anchor="middle">update</text>
+    <circle cx="400" cy="60" r="9" class="def"/><text x="400" y="40" text-anchor="middle" class="mono">@13</text><text x="400" y="90" text-anchor="middle">commit</text>
+    <circle cx="560" cy="60" r="9" class="badbox"/><text x="560" y="40" text-anchor="middle" class="mono">@14</text><text x="560" y="90" text-anchor="middle" class="badtext">verify failed</text>
+    <circle cx="760" cy="60" r="9" class="acc"/><text x="760" y="40" text-anchor="middle" class="mono">@15</text><text x="760" y="90" text-anchor="middle">rollback @11</text>
+  </g>
+  <path d="M760,102 C720,150 120,150 80,102" class="accline dash"/>
+  <text x="420" y="162" text-anchor="middle" class="acctext" font-size="12">@15 has the same code as @11; steps @12–@14 stay in the history</text>
+</svg>
+</div>
+
+<h2 id="hub"><span class="num">8</span>The hub: a GitHub for hashstash</h2>
+<p>Each project has a local store. <code>hshub</code> is the shared server, on your machine or in the cloud.
+It hosts many projects, takes pushes and pulls of hash deltas, runs the <b>shared lock service</b>, serves
+<b>MCP over HTTP</b>, and can <b>publish</b> any branch to an ordinary git repository.</p>
+<div class="figure">
+<svg viewBox="0 0 900 330" role="img" aria-labelledby="f8t">
+  <title id="f8t">Agents, the hub, and publishing to GitHub</title>
+  <defs>
+    <marker id="ar8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowfill"/></marker>
+    <marker id="ar8a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="accfill"/></marker>
+  </defs>
+  <g font-size="13">
+    <rect x="20" y="20" width="200" height="74" rx="10" class="def"/>
+    <text x="34" y="44" class="deftext" font-weight="600">Agent alice</text>
+    <text x="34" y="64" class="mono" font-size="12">hs  ·  hs mcp (stdio)</text>
+    <text x="34" y="84" class="mono muted" font-size="12">local .hs/ store</text>
+    <rect x="20" y="118" width="200" height="74" rx="10" class="def"/>
+    <text x="34" y="142" class="deftext" font-weight="600">Agent bob</text>
+    <text x="34" y="162" class="mono" font-size="12">hs  ·  hs mcp (stdio)</text>
+    <text x="34" y="182" class="mono muted" font-size="12">local .hs/ store</text>
+    <rect x="20" y="216" width="200" height="74" rx="10" class="box"/>
+    <text x="34" y="240" font-weight="600">Web agent</text>
+    <text x="34" y="260" class="mono" font-size="12">no local store</text>
+    <text x="34" y="280" class="mono muted" font-size="12">MCP over HTTP</text>
+  </g>
+  <line x1="224" y1="57"  x2="326" y2="110" class="line" marker-start="url(#ar8)" marker-end="url(#ar8)"/>
+  <line x1="224" y1="155" x2="326" y2="155" class="line" marker-start="url(#ar8)" marker-end="url(#ar8)"/>
+  <line x1="224" y1="253" x2="326" y2="200" class="line" marker-start="url(#ar8)" marker-end="url(#ar8)"/>
+  <text x="275" y="146" text-anchor="middle" class="muted" font-size="11">push / pull</text>
+
+  <rect x="330" y="20" width="300" height="290" rx="12" class="acc"/>
+  <text x="480" y="46" text-anchor="middle" class="acctext" font-weight="700" font-size="16">hshub</text>
+  <g font-size="13">
+    <rect x="348" y="60"  width="264" height="34" rx="6" class="box"/><text x="360" y="82">sync API · <tspan class="mono" font-size="12">/api/p/&lt;project&gt;/…</tspan></text>
+    <rect x="348" y="100" width="264" height="34" rx="6" class="box"/><text x="360" y="122">MCP · <tspan class="mono" font-size="12">/mcp/&lt;project&gt;</tspan></text>
+    <rect x="348" y="140" width="264" height="34" rx="6" class="box"/><text x="360" y="162">push gate: verified · fast-forward · locks</text>
+    <rect x="348" y="180" width="264" height="34" rx="6" class="box"/><text x="360" y="202">shared lock service</text>
+    <rect x="348" y="220" width="264" height="34" rx="6" class="box"/><text x="360" y="242">job worker: publish, verify</text>
+    <rect x="348" y="260" width="264" height="36" rx="6" class="glue"/><text x="360" y="283" class="muted">storage: objects · refs · locks · index</text>
+  </g>
+
+  <line x1="634" y1="237" x2="716" y2="237" class="accline" marker-end="url(#ar8a)"/>
+  <text x="675" y="227" text-anchor="middle" class="acctext" font-size="12">publish</text>
+  <rect x="720" y="190" width="160" height="96" rx="10" class="box"/>
+  <text x="800" y="216" text-anchor="middle" font-weight="600" font-size="14">git repository</text>
+  <text x="800" y="238" text-anchor="middle" class="muted" font-size="12">e.g. GitHub, branch</text>
+  <text x="800" y="256" text-anchor="middle" class="mono" font-size="12">nightly</text>
+  <text x="800" y="276" text-anchor="middle" class="muted" font-size="12">plain source files</text>
+  <rect x="720" y="40" width="160" height="110" rx="10" class="warnbox"/>
+  <text x="732" y="64" font-weight="600" font-size="13">A push is accepted</text>
+  <text x="732" y="84" font-size="12">✓ verification passed</text>
+  <text x="732" y="104" font-size="12">✓ fast-forward of main</text>
+  <text x="732" y="124" font-size="12">✓ no one else's locked</text>
+  <text x="732" y="140" font-size="12">   definitions changed</text>
+</svg>
+</div>
+
+<h3>Built to scale up</h3>
+<p>The hub talks to storage only through two interfaces, so the SQLite backend used today can be replaced
+without touching the protocol. This follows the way large code hosts scale:</p>
+<div class="tablewrap"><table>
+  <tr><th>Data</th><th>Today</th><th>At scale</th><th>Why it works</th></tr>
+  <tr><td>Code objects</td><td>SQLite per project</td><td>Object store sharded by hash (S3, GCS, Ceph)</td><td>Immutable and content-addressed: cache and copy anywhere</td></tr>
+  <tr><td>Branch heads</td><td>SQLite</td><td>Postgres</td><td>A push is one compare-and-swap row update</td></tr>
+  <tr><td>Locks</td><td>SQLite</td><td>Postgres or Redis</td><td>Leases with expiry</td></tr>
+  <tr><td>Index and graphs</td><td>Rebuilt per project</td><td>Built by workers, served from replicas</td><td>Derived from objects, so it can always be rebuilt</td></tr>
+  <tr><td>Jobs</td><td><code>hub.db</code> queue</td><td>Queue plus worker pools</td><td>Publish and verify run off the request path</td></tr>
+</table></div>
+<p class="muted">Web servers keep no state, so you can run as many as you like behind a load balancer.</p>
+
+<h2 id="agents"><span class="num">9</span>Made for AI agents</h2>
+<p>Everything a person can do with <code>hs</code>, an agent can do through MCP: 33 self-describing tools,
+from <code>hs_find</code> and <code>hs_graph</code> to <code>hs_edit_def</code>, <code>hs_verify</code> and <code>hs_push</code>.</p>
+<div class="cards">
+  <div class="card"><h3>Small units</h3><p>Agents read and change one function at a time, not whole files. Overlong definitions get a warning to split them.</p></div>
+  <div class="card"><h3>Locks</h3><p>An agent locks what it edits. Other agents are refused, locally and on the hub.</p></div>
+  <div class="card"><h3>Reasons recorded</h3><p>Every MCP edit needs a reason, which becomes part of the function's context history.</p></div>
+  <div class="card"><h3>Graph queries</h3><p>Callers, callees, impact, paths, unused code and cycles, answered from the index in one call.</p></div>
+</div>
+
+<h2 id="review"><span class="num">10</span>Who has looked: review flags and review pages</h2>
+<p>Agents commit a lot of code, so every commit records who reviewed it. Approval is never required; the flag simply shows,
+on your machine and on the hub alike, whether a commit was only checked by an AI or a person looked too.</p>
+<div class="figure">
+<svg viewBox="0 0 860 150" role="img" aria-label="Review flag of a commit going from unreviewed, to AI reviewed, to human approved">
+  <rect class="box" x="20" y="40" width="200" height="64" rx="10"/>
+  <text x="120" y="68" text-anchor="middle" font-weight="600">unreviewed</text>
+  <text x="120" y="88" text-anchor="middle" class="muted" font-size="13">just committed</text>
+  <rect class="def" x="330" y="40" width="200" height="64" rx="10"/>
+  <text x="430" y="68" text-anchor="middle" font-weight="600" class="deftext">AI reviewed</text>
+  <text x="430" y="88" text-anchor="middle" class="muted" font-size="13">agent checked its diff</text>
+  <rect class="acc" x="640" y="40" width="200" height="64" rx="10"/>
+  <text x="740" y="68" text-anchor="middle" font-weight="600" class="acctext">human approved</text>
+  <text x="740" y="88" text-anchor="middle" class="muted" font-size="13">a person looked too</text>
+  <path class="line" d="M222 72 H322"/><path class="arrowfill" d="M322 66 L330 72 L322 78 Z"/>
+  <path class="line" d="M532 72 H632"/><path class="arrowfill" d="M632 66 L640 72 L632 78 Z"/>
+  <text x="276" y="62" text-anchor="middle" font-size="12" class="muted">hs_review</text>
+  <text x="586" y="62" text-anchor="middle" font-size="12" class="muted">review page</text>
+  <text x="430" y="135" text-anchor="middle" font-size="13" class="muted">Commits, pushes and pulls never wait on the flag. Reviews travel with push and pull.</text>
+</svg>
+<div class="cap">After committing, an agent gets back the exact line diff it stored, checks it, and records an AI review. A person can approve later in the browser.</div>
+</div>
+<div class="cards">
+  <div class="card"><h3>Line diffs per function</h3><p><code>hs show</code>, MCP <code>hs_show</code> and the pages show every changed function, module code and deleted code line by line.</p></div>
+  <div class="card"><h3>Test results per function</h3><p>"18/20 passed, 2 failed" beside each function, so you only open the tests that matter.</p></div>
+  <div class="card"><h3>Review pages</h3><p><code>hs ui</code> for your local copy, <code>/ui</code> on the hub: commits, pushes, diffs, tests, and a form to approve or request changes.</p></div>
+  <div class="card"><h3>You choose where</h3><p><code>[review] approval</code> lists commits waiting for a person locally, on the hub, both, or nowhere.</p></div>
+</div>
+
+<h2 id="status"><span class="num">11</span>Where it stands</h2>
+<div class="status">
+  <div class="card">
+    <h3><span class="pill done">working</span></h3>
+    <ul>
+      <li>Python and C/C++ import, with a byte-exact round trip</li>
+      <li>Edit, update, diff, commit, log, history, rollback</li>
+      <li>Tests per function, verify with impact testing, push gate</li>
+      <li>Notes, context, locks, call graph and search</li>
+      <li><code>hshub</code>: push, pull, clone, shared locks, MCP over HTTP</li>
+      <li>Publishing to git</li>
+      <li>Review flags, review pages (local and hub), per-function test summaries</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3><span class="pill next">next</span></h3>
+    <ul>
+      <li>Branches and merging diverged work</li>
+      <li>Fragments and crumbs for large functions (GUID-tagged, lockable)</li>
+      <li>Linux build and testing</li>
+      <li>Large-scale storage backends</li>
+      <li>Graphical editor</li>
+    </ul>
+  </div>
+</div>
+<p style="margin-top:28px"><a href="guide.html"><b>Read the manual →</b></a></p>
+</main>
+
+<footer><div class="inner">hashstash: version control for AI/SI agentic coding.</div></footer>
+</body>
+</html>

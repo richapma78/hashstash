@@ -586,6 +586,11 @@ hshub user add <name> --root <dir> [--password p]   someone who can sign in to t
 hshub key orchestrator <project> --root <dir> [--days 30] [--label l]
 ```
 
+`tools\install-hub.ps1 [-HubDir dir]` sets up an always-on hub on Windows from a
+build: it copies `hshub.exe` and `hs.exe` into `<dir>in` (so rebuilding never needs
+the hub stopped), keeps the data in `<dir>\data`, and starts it in the background
+(`start-hub.ps1` / `stop-hub.ps1` in that folder).
+
 The pages at `/ui/p/<project>/access` list a project's keys, create orchestrator
 keys, revoke keys, and switch key protection on or off.
 
