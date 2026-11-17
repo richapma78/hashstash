@@ -1,5 +1,6 @@
 #include "ops/import_render.h"
 
+#include <algorithm>
 #include <set>
 
 #include "ops/build.h"
@@ -122,8 +123,40 @@ ImportResult import_path(Repo& repo, const fs::path& src_in, const std::string& 
   return res;
 }
 
+std::vector<std::string> remove_files(Repo& repo, const std::vector<std::string>& paths,
+                                      const std::string& message) {
+  Store& s = repo.store();
+  std::vector<std::string> removed;
+  s.transaction([&] {
+    Namespace ns = repo.work_ns();
+    for (std::string p : paths) {
+      std::replace(p.begin(), p.end(), '\\', '/');
+      while (!p.empty() && p.back() == '/') p.pop_back();
+      if (p.empty()) throw std::runtime_error("hs rm --file: an empty path would remove everything");
+      bool any = false;
+      for (auto it = ns.files.begin(); it != ns.files.end();) {
+        if (it->first == p || it->first.rfind(p + "/", 0) == 0) {
+          removed.push_back(it->first);
+          it = ns.files.erase(it);
+          any = true;
+        } else ++it;
+      }
+      if (!any) throw std::runtime_error("no file or folder named '" + p + "'");
+    }
+    fix_lineage(s, ns);
+    repo.set_work_ns(ns, "rm", message.empty() ? "remove " + std::to_string(removed.size()) + " file(s)" : message);
+  });
+  return removed;
+}
+
+static int64_t file_mtime(const fs::path& p) {
+  std::error_code ec;
+  auto t = fs::last_write_time(p, ec);
+  return ec ? 0 : (int64_t)t.time_since_epoch().count();
+}
+
 RenderResult render_to(Repo& repo, const fs::path& out_in, const Hash& ns_hash,
-                       const std::function<bool(const std::string& path)>& skip) {
+                       const std::function<bool(const std::string& path)>& skip, bool full) {
   RenderResult res;
   Store& s = repo.store();
   Namespace ns = load_namespace(s, ns_hash.empty() ? repo.work_ns_hash() : ns_hash);
@@ -131,26 +164,42 @@ RenderResult render_to(Repo& repo, const fs::path& out_in, const Hash& ns_hash,
   std::string key = to_generic(out);
   fs::create_directories(out);
 
-  std::map<std::string, std::string> previous;
+  struct Written {
+    std::string hash;
+    int64_t size = -1;
+    int64_t mtime = 0;
+  };
+  std::map<std::string, Written> previous;
   {
-    Stmt st(s.db(), "SELECT path, hash FROM render_manifest WHERE out_dir = ?");
+    Stmt st(s.db(), "SELECT path, hash, size, mtime FROM render_manifest WHERE out_dir = ?");
     st.bind(1, key);
-    while (st.step()) previous[st.text(0)] = st.text(1);
+    while (st.step()) previous[st.text(0)] = {st.text(1), st.integer(2), st.integer(3)};
   }
   s.transaction([&] {
     Stmt del(s.db(), "DELETE FROM render_manifest WHERE out_dir = ?");
     del.bind(1, key).run();
-    Stmt add(s.db(), "INSERT INTO render_manifest(out_dir, path, hash) VALUES (?, ?, ?)");
+    Stmt add(s.db(), "INSERT INTO render_manifest(out_dir, path, hash, size, mtime) VALUES (?, ?, ?, ?, ?)");
     for (auto& [path, e] : ns.files) {
       if (skip && skip(path)) {
         ++res.ignored;
         continue;
       }
       fs::path target = out / from_utf8(path);
+      std::error_code ec;
+      auto prev = previous.find(path);
+      if (!full && prev != previous.end() && prev->second.hash == e.hash && prev->second.size >= 0) {
+        auto size = fs::file_size(target, ec);
+        if (!ec && (int64_t)size == prev->second.size && file_mtime(target) == prev->second.mtime) {
+          ++res.unchanged;  // the store says it is the same content and nobody touched the file: no render
+          ++res.reused;
+          add.bind(1, key).bind(2, path).bind(3, e.hash).bind(4, (long long)prev->second.size).bind(5, (long long)prev->second.mtime).run();
+          add.reset();
+          continue;
+        }
+      }
       std::string bytes = render_entry(s, e);
       bool same = false;
       if (fs::exists(target)) {
-        std::error_code ec;
         if (fs::file_size(target, ec) == bytes.size()) same = read_file(target) == bytes;
       }
       if (same) ++res.unchanged;
@@ -158,7 +207,7 @@ RenderResult render_to(Repo& repo, const fs::path& out_in, const Hash& ns_hash,
         write_file(target, bytes);
         ++res.written;
       }
-      add.bind(1, key).bind(2, path).bind(3, e.hash).run();
+      add.bind(1, key).bind(2, path).bind(3, e.hash).bind(4, (long long)bytes.size()).bind(5, (long long)file_mtime(target)).run();
       add.reset();
     }
     for (auto& [path, h] : previous) {

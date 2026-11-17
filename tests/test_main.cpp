@@ -239,6 +239,48 @@ TEST(import_render_project) {
     CHECK(read_file(out / "pkg" / "sample.py") == read_file(fs::path(HS_FIXTURES) / "py" / "sample.py"));
     auto rr2 = render_to(*repo, out);
     CHECK(rr2.written == 0 && rr2.unchanged == 2);
+    CHECK(rr2.reused == 2);  // delta render: nothing regenerated
+    // An edited file is noticed (size/mtime differ) and put back; the others are still reused.
+    write_file(out / "pkg" / "sample.py", "x = 1\n");
+    auto rr3 = render_to(*repo, out);
+    CHECK(rr3.written == 1 && rr3.reused == 1);
+    CHECK(read_file(out / "pkg" / "sample.py") == read_file(fs::path(HS_FIXTURES) / "py" / "sample.py"));
+    // A deleted file comes back.
+    fs::remove(out / "pkg" / "sample.py");
+    auto rr4 = render_to(*repo, out);
+    CHECK(rr4.written == 1 && rr4.reused == 1);
+    // --full regenerates and compares everything, writing nothing that is already right.
+    auto rr5 = render_to(*repo, out, "", {}, true);
+    CHECK(rr5.written == 0 && rr5.unchanged == 2 && rr5.reused == 0);
+  }
+  fs::remove_all(dir);
+}
+
+TEST(remove_files) {
+  fs::path dir = temp_dir("rmfile");
+  {
+    auto repo = Repo::init(dir, "t");
+    import_path(*repo, fs::path(HS_FIXTURES) / "py", "pkg");
+    import_path(*repo, fs::path(HS_FIXTURES) / "py", "other");
+    size_t before = repo->work_ns().files.size();
+    auto one = remove_files(*repo, {"pkg/sample.py"});
+    CHECK(one.size() == 1 && one[0] == "pkg/sample.py");
+    CHECK(repo->work_ns().files.size() == before - 1);
+    CHECK(!repo->work_ns().files.count("pkg/sample.py"));
+    for (auto& [q, id] : repo->work_ns().lineage) CHECK(q.rfind("pkg/sample.py", 0) != 0);  // its definitions went too
+    auto folder = remove_files(*repo, {"other/"});
+    CHECK(folder.size() == 2);
+    CHECK(repo->work_ns().files.size() == before - 3);
+    bool threw = false;
+    try {
+      remove_files(*repo, {"nope.txt"});
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    CHECK(threw);
+    fs::path out = dir / "out";
+    render_to(*repo, out);
+    CHECK(!fs::exists(out / "pkg" / "sample.py") && !fs::exists(out / "other"));
   }
   fs::remove_all(dir);
 }
@@ -1035,6 +1077,18 @@ TEST(git_ignore_rules) {
     git_ignore_remove(*r2, "tests/");
     CHECK(git_ignore_list(*r2).empty());
     CHECK(r2->work_ns_hash() == ns_before);              // no rules: the same namespace hash as before
+
+    // A publish of the same commit again records nothing.
+    auto pub3 = publish(*r2);
+    auto again = publish(*r2);
+    CHECK(!again.contains("git_commit"));
+    // Git holding identical files under a commit that does not name the hashstash commit (a history adopted
+    // from git, as with the Godot fork): the publish is still recorded and named.
+    run_command(out, "git -c user.name=x -c user.email=x@y commit -q --allow-empty -m adopted-history");
+    auto pub4 = publish(*r2);
+    CHECK(!pub4["changed"].get<bool>() && pub4.contains("git_commit"));
+    RunResult tip = run_command(out, "git log -1 --format=%s");
+    CHECK(tip.output.find("hashstash publish #" + short_hash(*r2->head_commit())) == 0);
   }
   std::error_code ec;
   fs::remove_all(dir, ec);

@@ -108,13 +108,14 @@ nlohmann::json publish(Repo& repo, const std::string& branch_in) {
   Namespace tree = load_namespace(s, ns);
   RenderResult rr = render_to(repo, dir, ns, [&](const std::string& path) { return git_ignored(tree, path); });
 
-  // Commit message: the hashstash commits since the last publish.
+  // Commit message: the hashstash commits since the last publish, by id and message. Authors are left out: they are
+  // <OS user>@<computer> by default, and a published repository may be public.
   std::string last = s.ref("publish/" + branch).value_or("");
   std::string body;
   int count = 0;
   for (auto h = *head; !h.empty() && h != last && count < 50;) {
     Commit cm = load_commit(s, h);
-    body += "- " + cm.message + " (#" + short_hash(h) + ", " + cm.author + ")\n";
+    body += "- " + cm.message + " (#" + short_hash(h) + ")\n";
     ++count;
     h = cm.parents.empty() ? "" : cm.parents[0];
   }
@@ -123,15 +124,26 @@ nlohmann::json publish(Repo& repo, const std::string& branch_in) {
 
   must(git(dir, "add -A"), "git add");
   bool changed = git(dir, "diff --cached --quiet").code != 0;
+  // Every publish of a new hashstash commit is recorded on the git branch, even when the files are already
+  // identical (a branch adopted from an existing git history, or a commit that only changed hashstash-side
+  // data): an empty commit names the hashstash commit, so git always says which commit it holds.
+  std::string tip = trim(git(dir, "log -1 --format=%s").output);
+  bool recorded = tip.rfind("hashstash publish #" + short_hash(*head) + " ", 0) == 0;
+  bool record = changed || !recorded;
   nlohmann::json out = {{"commit", short_hash(*head)}, {"dir", to_generic(dir)}, {"written", rr.written},
                         {"deleted", rr.deleted}, {"git_ignored", rr.ignored}, {"changed", changed}};
-  if (changed) {
-    must(git(dir, "-c user.name=hashstash -c user.email=hashstash@localhost commit -q -F " +
+  if (record) {
+    must(git(dir, std::string("-c user.name=hashstash -c user.email=hashstash@localhost commit -q ") +
+                      (changed ? "" : "--allow-empty ") + "-F " +
                       shell_quote((repo.hs_dir() / "publish-message.txt").string())),
          "git commit");
     out["git_commit"] = trim(git(dir, "rev-parse --short HEAD").output);
   }
-  if (!remote.empty() && changed) {
+  // Push when this publish committed, or when the remote branch is missing or behind (an earlier push failed).
+  bool behind = !remote.empty() &&
+                (git(dir, "rev-parse --verify -q " + remote + "/" + c.publish_branch).code != 0 ||
+                 trim(git(dir, "rev-list --count " + remote + "/" + c.publish_branch + "..HEAD").output) != "0");
+  if (!remote.empty() && (record || behind)) {
     must(git(dir, "push -q " + remote + " " + c.publish_branch), "git push");
     out["pushed"] = remote + "/" + c.publish_branch;
   }

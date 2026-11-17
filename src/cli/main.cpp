@@ -40,7 +40,9 @@ const char* kUsage = R"(hs - hashstash, version control for AI/SI agentic coding
 Project
   hs init [name]                      create a project store (.hs/) here
   hs import <path> [--prefix dir]     bring in existing code: split, index, graph
-  hs render [--out dir] [--at ref]    generate source files (default out: ./out)
+  hs render [--out dir] [--at ref] [--full]
+                                      generate source files (default out: ./out); only files
+                                      an update touched are regenerated (--full: all of them)
   hs status                           uncommitted changes, locks, open edits
 
 Browse
@@ -55,6 +57,7 @@ Edit (code lives in the store; edits happen in scratch files)
   hs new <file>[:<Class>] [--after n] add a section for new code
   hs update [-m reason]               store the edits from the scratch files
   hs rm <name>                        delete a definition
+  hs rm --file <path>...              delete whole files (or every file under a folder)
 
 Review and history
   hs diff [name] [--from ref] [--to ref] [--stat]
@@ -236,10 +239,11 @@ int cmd_import(Repo& repo, const Args& a) {
 int cmd_render(Repo& repo, const Args& a) {
   fs::path out = a.get("--out", "out");
   Hash ns = a.has("--at") ? resolve_ns(repo, a.get("--at")) : "";
-  auto r = render_to(repo, out, ns);
-  if (g_json) return out_json({{"written", r.written}, {"unchanged", r.unchanged}, {"deleted", r.deleted}}), 0;
+  auto r = render_to(repo, out, ns, {}, a.has("--full"));
+  if (g_json)
+    return out_json({{"written", r.written}, {"unchanged", r.unchanged}, {"reused", r.reused}, {"deleted", r.deleted}}), 0;
   std::cout << "Rendered to " << to_generic(fs::absolute(out)) << ": " << r.written << " written, " << r.unchanged
-            << " unchanged, " << r.deleted << " deleted.\n";
+            << " unchanged (" << r.reused << " not regenerated), " << r.deleted << " deleted.\n";
   return 0;
 }
 
@@ -428,6 +432,11 @@ int cmd_update(Repo& repo, const Args& a) {
 
 int cmd_rm(Repo& repo, const Args& a) {
   need(a, 2, "rm <name>");
+  if (a.has("--file")) {  // whole files or folders, not definitions
+    std::vector<std::string> paths(a.pos.begin() + 1, a.pos.end());
+    for (auto& p : remove_files(repo, paths, a.get("-m"))) std::cout << "removed file " << p << "\n";
+    return 0;
+  }
   Namespace ns = repo.work_ns();
   std::vector<EditOutcome> outs;
   for (size_t i = 1; i < a.pos.size(); ++i) {

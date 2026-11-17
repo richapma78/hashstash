@@ -168,6 +168,8 @@ CREATE TABLE IF NOT EXISTS render_manifest (
   out_dir TEXT NOT NULL,
   path TEXT NOT NULL,
   hash TEXT NOT NULL,
+  size INTEGER NOT NULL DEFAULT -1,  -- of the file as written (-1: unknown, compare the bytes)
+  mtime INTEGER NOT NULL DEFAULT 0,  -- its modification time after writing (or after checking it)
   PRIMARY KEY (out_dir, path)
 ) WITHOUT ROWID;
 
@@ -296,6 +298,9 @@ Store::Store(const std::string& db_path) {
        "ALTER TABLE lock ADD COLUMN work TEXT NOT NULL DEFAULT ''"},
       /* 2 -> 3: change requests carry context for whichever agent picks them up */
       {"ALTER TABLE request ADD COLUMN context TEXT NOT NULL DEFAULT '{}'"},
+      /* 3 -> 4: delta renders: the manifest records each file's size and mtime */
+      {"ALTER TABLE render_manifest ADD COLUMN size INTEGER NOT NULL DEFAULT -1",
+       "ALTER TABLE render_manifest ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0"},
   };
   for (int v = version; v < kStoreVersion; ++v) {
     for (const char* sql : kMigrations.at(v)) {

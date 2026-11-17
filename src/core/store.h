@@ -44,7 +44,7 @@ class Stmt {
 };
 
 // The store format this build reads and writes (see Store::Store).
-constexpr int kStoreVersion = 3;
+constexpr int kStoreVersion = 4;
 
 class Store {
  public:
